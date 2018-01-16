@@ -1289,13 +1289,6 @@ process_begin(struct context *ctx, unsigned flags)
         union process *p = &ctx->proc;
         ctx->iter = it(&ctx->states, ctx->iter);
         if (!ctx->iter) {
-            /* cleanup frame */
-            arena_clear(&ctx->arena);
-            list_init(&ctx->states);
-            if (flags & PROCESS_CLEAR) {
-                free_blocks(&ctx->blkmem);
-                block_alloc_init(&ctx->blkmem);
-            }
             /* state transition table */
             if (flags & flag(PROC_BLUEPRINT))
                 jmpto(ctx, STATE_BLUEPRINT);
