@@ -122,7 +122,6 @@ struct element {
     int type;
     unsigned id, parent;
     unsigned flags;
-    int cnt, lnks;
 };
 struct component {
     unsigned version;
@@ -131,12 +130,14 @@ struct component {
 
     const struct element *elms;
     const int elmcnt;
-    const unsigned *lnks;
-    const int lnkcnt;
-    struct boxes *boxes;
+    const unsigned *tbl_vals;
+    const unsigned *tbl_keys;
+    const int tblcnt;
+    struct box *boxes;
     int boxcnt;
-    unsigned *tbl;
-    int tblcnt;
+    struct box **bfs;
+    struct module *module;
+    struct repository *repo;
 };
 
 /* box */
@@ -384,17 +385,21 @@ union process {
 enum widget_internal {
     WIDGET_INTERNAL_BEGIN = 0x100000,
     /* layers */
-    WIDGET_ROOT,
+    WIDGET_LAYER_BEGIN,
+    WIDGET_ROOT = WIDGET_LAYER_BEGIN,
     WIDGET_OVERLAY,
     WIDGET_POPUP,
     WIDGET_CONTEXTUAL,
     WIDGET_UNBLOCKING,
     WIDGET_BLOCKING,
     WIDGET_UI,
+    WIDGET_LAYER_END = WIDGET_UI,
+
     /* widgets */
     WIDGET_PANEL,
     WIDGET_POPUP_PANEL,
-    WIDGET_CONTEXTUAL_PANEL
+    WIDGET_CONTEXTUAL_PANEL,
+    WIDGET_SLOT
 };
 struct context {
     int state;
@@ -413,9 +418,13 @@ struct context {
     struct list_hook mod;
     struct list_hook garbage;
     struct list_hook freelist;
-    struct module *root;
 
     /* tree */
+    struct module root;
+    struct box boxes[8];
+    struct box *bfs[8];
+    struct repository repo;
+
     struct box *tree;
     struct box *overlay;
     struct box *popup;
@@ -455,11 +464,14 @@ api void input_button(struct context *ctx, enum mouse_button btn, int down);
 
 /* module */
 api struct state* begin(struct context *ctx, unsigned id);
-api void module_begin(struct state *s, unsigned id);
-api void module_end(struct state *s);
-api void link(struct state *s, unsigned id);
 api void end(struct state *s);
-api void load_table(struct context *ctx, unsigned id, const struct component *c);
+api struct state* module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid);
+api void module_end(struct state *s);
+api void load(struct context *ctx, unsigned id, const struct component *c);
+api void section_begin(struct state *s, unsigned id);
+api void section_end(struct state *s);
+api void link(struct state *s, unsigned id);
+api void slot(struct state *s, unsigned id);
 
 /* widget */
 api void widget_begin(struct state *s, int type);
@@ -511,25 +523,27 @@ static const struct allocator default_allocator = {0,dalloc,dfree};
 #define list_foreach_rev_s(i,n,l) for ((i)=(l)->prev,(n)=(i)->prev;(i)!=(l);(i)=(n),(n)=(i)->prev)
 
 static const struct element g_root_elements[] = {
-    /* type             id, parent, flags,                          cnt,    lnk*/
-    {WIDGET_ROOT,       0,  0,      BOX_INTERACTIVE|BOX_UNIFORM,    1,      0},
-    {WIDGET_OVERLAY,    1,  0,      BOX_INTERACTIVE|BOX_UNIFORM,    1,      1},
-    {WIDGET_POPUP,      2,  1,      BOX_INTERACTIVE|BOX_UNIFORM,    1,      2},
-    {WIDGET_CONTEXTUAL, 3,  2,      BOX_INTERACTIVE|BOX_UNIFORM,    1,      3},
-    {WIDGET_UNBLOCKING, 4,  3,      BOX_INTERACTIVE|BOX_UNIFORM,    1,      4},
-    {WIDGET_BLOCKING,   5,  4,      BOX_INTERACTIVE|BOX_UNIFORM,    1,      5},
-    {WIDGET_UI,         6,  5,      BOX_INTERACTIVE|BOX_UNIFORM,    0,      5},
-}; static const unsigned g_root_lnks[] = {1,2,3,4,5,6};
+    /* type             id, parent, flags,                     */
+    {WIDGET_ROOT,       0,  0,      BOX_INTERACTIVE|BOX_UNIFORM},
+    {WIDGET_OVERLAY,    1,  0,      BOX_INTERACTIVE|BOX_UNIFORM},
+    {WIDGET_POPUP,      2,  1,      BOX_INTERACTIVE|BOX_UNIFORM},
+    {WIDGET_CONTEXTUAL, 3,  2,      BOX_INTERACTIVE|BOX_UNIFORM},
+    {WIDGET_UNBLOCKING, 4,  3,      BOX_INTERACTIVE|BOX_UNIFORM},
+    {WIDGET_BLOCKING,   5,  4,      BOX_INTERACTIVE|BOX_UNIFORM},
+    {WIDGET_UI,         6,  5,      BOX_INTERACTIVE|BOX_UNIFORM},
+};
+static const unsigned g_root_table_keys[] = {0,1,2,3,4,5,6,0};
+static const unsigned g_root_table_vals[] = {0,1,2,3,4,5,6,0};
 static const struct component g_root = {
     VERSION, 0, 7,
     g_root_elements, cntof(g_root_elements),
-    g_root_lnks, cntof(g_root_lnks),
-    NULL, 0, NULL, 0
+    g_root_table_vals, g_root_table_keys, 8,
+    NULL, 0, NULL, NULL
 };
 #define OPCODES(OP)\
     OP(BUF_BEGIN,       1,  "%u")\
-    OP(BUF_UPLINK,      2,  "%u %u")\
-    OP(BUF_DWNLINK,     1,  "%u")\
+    OP(BUF_ULINK,       2,  "%u %u")\
+    OP(BUF_DLINK,       1,  "%u")\
     OP(BUF_END,         1,  "%u")\
     OP(WIDGET_BEGIN,    1,  "%d")\
     OP(WIDGET_END,      0,  "")  \
@@ -1019,7 +1033,7 @@ state_find(struct context *ctx, unsigned id)
     } return 0;
 }
 api struct state*
-begin(struct context *ctx, unsigned id)
+module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
 {
     struct state *s = state_find(ctx, id);
     if (s) {s->op_idx -= 2; return s;}
@@ -1035,25 +1049,43 @@ begin(struct context *ctx, unsigned id)
     {union param p[5];
     p[0].op = OP_BUF_BEGIN;
     p[1].id = id;
-    p[2].op = OP_BUF_UPLINK;
-    p[3].id = 0;
-    p[4].id = WIDGET_UI;
+    p[2].op = OP_BUF_ULINK;
+    p[3].id = mid;
+    p[4].id = bid;
     op_add(s, p, cntof(p));}
     return s;
 }
 api void
-module_begin(struct state *s, unsigned id)
+module_end(struct state *s)
+{
+    union param p[2];
+    p[0].op = OP_BUF_END;
+    p[1].id = s->id;
+    op_add(s, p, cntof(p));
+}
+api struct state*
+begin(struct context *ctx, unsigned id)
+{
+    return module_begin(ctx, id, 0, WIDGET_UI);
+}
+api void
+end(struct state *s)
+{
+    module_end(s);
+}
+api void
+section_begin(struct state *s, unsigned id)
 {
     union param p[5];
     p[0].op = OP_BUF_BEGIN;
     p[1].id = id;
-    p[2].op = OP_BUF_UPLINK;
+    p[2].op = OP_BUF_ULINK;
     p[3].id = s->id;
     p[4].id = s->lastid;
     op_add(s, p, cntof(p));
 }
 api void
-module_end(struct state *s)
+section_end(struct state *s)
 {
     union param p[2];
     p[0].op = OP_BUF_END;
@@ -1064,16 +1096,8 @@ api void
 link(struct state *s, unsigned id)
 {
     union param p[2];
-    p[0].op = OP_BUF_DWNLINK;
+    p[0].op = OP_BUF_DLINK;
     p[1].id = id;
-    op_add(s, p, cntof(p));
-}
-api void
-end(struct state *s)
-{
-    union param p[2];
-    p[0].op = OP_BUF_END;
-    p[1].id = s->id;
     op_add(s, p, cntof(p));
 }
 api void
@@ -1120,6 +1144,17 @@ widget_end(struct state *s)
     p[0].op = OP_WIDGET_END;
     op_add(s, p, cntof(p));
 }
+api void
+slot(struct state *s, unsigned id)
+{
+    union param p[3];
+    widget_begin(s, WIDGET_SLOT);
+    p[0].op = OP_BOX_PUSH;
+    p[1].id = id;
+    p[2].op = OP_BOX_POP;
+    op_add(s, p, cntof(p));
+    widget_end(s);
+}
 intern struct module*
 module_find(struct context *ctx, unsigned id)
 {
@@ -1143,6 +1178,42 @@ bfs(struct box **buf, struct box *root)
         list_foreach(i, &b->lnks)
             que[++tail] = list_entry(i,struct box,node);
     } return que+1;
+}
+api void
+load(struct context *ctx, unsigned id, const struct component *c)
+{
+    int i = 0;
+    struct repository *repo = c->repo;
+    struct module *m = c->module;
+    assert(VERSION == c->version);
+
+    zero(m, szof(*m));
+    m->id = id;
+    m->root = c->boxes;
+    m->repo[m->repoid] = c->repo;
+    list_init(&m->hook);
+
+    zero(repo, szof(*repo));
+    repo->depth = c->depth;
+    repo->boxes = c->boxes;
+    repo->boxcnt = c->boxcnt;
+    repo->bfs = c->bfs;
+    repo->tbl.cnt = c->tblcnt;
+    repo->tbl.keys = cast(unsigned*, c->tbl_keys);
+    repo->tbl.vals = cast(int*, c->tbl_vals);
+
+    for (i = 0; i < c->elmcnt; ++i) {
+        const struct element *e = c->elms;
+        struct box *b = c->boxes + lookup(&repo->tbl, e->id);
+        struct box *p = c->boxes + lookup(&repo->tbl, e->parent);
+
+        b->id = e->id;
+        b->type = e->type;
+        b->flags = e->flags;
+        list_init(&b->node);
+        list_init(&b->lnks);
+        if (b != p) list_add_tail(&p->lnks, &b->node);
+    } repo->bfs = bfs(repo->bfs, repo->boxes);
 }
 intern void
 operation_begin(union process *p, enum process_type type,
@@ -1415,7 +1486,7 @@ process_begin(struct context *ctx, unsigned flags)
                     op += opdefs[op[0].op].argc + 1;
                 } eos:; break;
             }
-            case OP_BUF_UPLINK: {
+            case OP_BUF_ULINK: {
                 /* find parent module */
                 struct repository *prepo;
                 struct module *pm = module_find(ctx, op[1].id);
@@ -1430,7 +1501,7 @@ process_begin(struct context *ctx, unsigned flags)
                 list_del(&b->node);
                 list_add_tail(&pb->lnks, &b->node);}
             } break;
-            case OP_BUF_DWNLINK: {
+            case OP_BUF_DLINK: {
                 /* find child module */
                 struct module *cm = module_find(ctx, op[1].id);
                 if (!cm->root) break;
@@ -1468,7 +1539,6 @@ process_begin(struct context *ctx, unsigned flags)
             } break;}
             op += opdefs[op[0].op].argc + 1;
         } eol0:;}
-        ctx->tree = repo->boxes;
         repo->bfs = bfs(repo->bfs, repo->boxes);
 
         /* III.) Free old repository */
@@ -1981,7 +2051,8 @@ blueprint(union process *op, struct box *b)
                 b->dh = ctx->input.height;
             }
         } break;
-        case WIDGET_PANEL: {
+        case WIDGET_PANEL:
+        case WIDGET_SLOT: {
             measure(b,0);
         } break;}
     } else measure(b,0);
@@ -1995,6 +2066,7 @@ layout(union process *op, struct box *b)
 
     switch (b->type) {
     case WIDGET_PANEL:
+    case WIDGET_SLOT:
         layout_default(b); break;
     case WIDGET_ROOT: {
         if (b == ctx->tree) {
@@ -2071,6 +2143,28 @@ init(struct context *ctx, const struct allocator *a)
     list_init(&ctx->mod);
     list_init(&ctx->garbage);
     list_init(&ctx->freelist);
+
+    /* setup root module */
+    {struct component root;
+    memcpy(&root, &g_root, sizeof(root));
+    root.boxes = ctx->boxes;
+    root.boxcnt = WIDGET_LAYER_BEGIN - WIDGET_LAYER_END;
+    root.module = &ctx->root;
+    root.repo = &ctx->repo;
+    root.bfs = ctx->bfs;
+    load(ctx, 0, &root);}
+
+    ctx->tree = ctx->boxes + (WIDGET_ROOT - WIDGET_LAYER_BEGIN);
+    ctx->overlay = ctx->boxes + (WIDGET_OVERLAY - WIDGET_LAYER_BEGIN);
+    ctx->popup = ctx->boxes + (WIDGET_POPUP - WIDGET_LAYER_BEGIN);
+    ctx->contextual = ctx->boxes + (WIDGET_CONTEXTUAL - WIDGET_LAYER_BEGIN);
+    ctx->unblocking = ctx->boxes + (WIDGET_UNBLOCKING - WIDGET_LAYER_BEGIN);
+    ctx->blocking = ctx->boxes + (WIDGET_BLOCKING - WIDGET_LAYER_BEGIN);
+    ctx->ui = ctx->boxes + (WIDGET_UI - WIDGET_LAYER_BEGIN);
+
+    ctx->active = ctx->boxes;
+    ctx->origin = ctx->boxes;
+    ctx->hot = ctx->boxes;
 }
 api struct context*
 create(const struct allocator *a)
