@@ -468,6 +468,7 @@ api void end(struct state *s);
 api struct state* module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid);
 api void module_end(struct state *s);
 api void load(struct context *ctx, unsigned id, const struct component *c);
+api void call(struct context *ctx, unsigned id, const union param *op, int opcnt);
 api void section_begin(struct state *s, unsigned id);
 api void section_end(struct state *s);
 api void link(struct state *s, unsigned id);
@@ -1178,6 +1179,21 @@ bfs(struct box **buf, struct box *root)
         list_foreach(i, &b->lnks)
             que[++tail] = list_entry(i,struct box,node);
     } return que+1;
+}
+api void
+call(struct context *ctx, unsigned id, const union param *op, int opcnt)
+{
+    int i = 0;
+    static const int op_cnt[] = {
+        #define OP(a,b,c) b,
+        OPCODES(OP) 0
+        #undef OP
+    }; struct state *s = begin(ctx, id);
+    for (i = 0; i < opcnt; ++i) {
+        const int cnt = op_cnt[op[i].op];
+        op_add(s, op + i, cnt + 1);
+        op += cnt;
+    } end(s);
 }
 api void
 load(struct context *ctx, unsigned id, const struct component *c)
