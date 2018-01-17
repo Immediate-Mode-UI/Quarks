@@ -160,8 +160,8 @@ struct box {
 
     /* transform */
     int dw, dh;
-    struct transform loc, scr;
-    struct rect local, screen;
+    struct transform tloc, tscr;
+    struct rect loc, scr;
 
     /* state */
     unsigned hidden:1;
@@ -943,10 +943,10 @@ box_shrink(struct box *d, const struct box *s, int pad)
 {
     assert(d && s);
     if (!d || !s) return;
-    d->local.x = s->local.x + pad;
-    d->local.y = s->local.y + pad;
-    d->local.w = max(0, s->local.w - 2*pad);
-    d->local.h = max(0, s->local.h - 2*pad);
+    d->loc.x = s->loc.x + pad;
+    d->loc.y = s->loc.y + pad;
+    d->loc.w = max(0, s->loc.w - 2*pad);
+    d->loc.h = max(0, s->loc.h - 2*pad);
 }
 intern void
 transform_init(struct transform *t)
@@ -1193,7 +1193,7 @@ call(struct context *ctx, unsigned id, const union param *op, int opcnt)
     for (i = 0; i < opcnt; ++i) {
         const int cnt = op_cnt[op[i].op];
         op_add(s, op + i, cnt + 1);
-        op += cnt;
+        i += cnt + 1;
     } end(s);
 }
 api void
@@ -1272,7 +1272,7 @@ at(struct box *b, int mx, int my)
     r:list_foreach_rev(i, &b->lnks) {
         struct box *sub = list_entry(i, struct box, node);
         if (!(sub->flags & BOX_INTERACTIVE) || (sub->flags & BOX_HIDDEN)) continue;
-        if (inbox(mx, my, sub->screen.x, sub->screen.y, sub->screen.w, sub->screen.h))
+        if (inbox(mx, my, sub->scr.x, sub->scr.y, sub->scr.w, sub->scr.h))
             {b = sub; goto r;}
     } return b;
 }
@@ -1460,8 +1460,8 @@ process_begin(struct context *ctx, unsigned flags)
         m->root = repo->boxes;
         list_init(&m->root->node);
         list_init(&m->root->lnks);
-        transform_init(&m->root->loc);
-        transform_init(&m->root->scr);
+        transform_init(&m->root->tloc);
+        transform_init(&m->root->tscr);
 
         /* II.) Setup repository data */
         {int type = 0, depth = 1;
@@ -1537,13 +1537,13 @@ process_begin(struct context *ctx, unsigned flags)
 
                 /* setup box tree node */
                 {struct box *b = repo->boxes + idx;
+                transform_init(&b->tloc);
+                transform_init(&b->tscr);
                 b->id = id;
                 b->cnt = 0;
                 b->type = type;
                 b->parent = pb;
                 b->depth = depth;
-                transform_init(&b->loc);
-                transform_init(&b->scr);
 
                 /* link box into parent */
                 list_init(&b->node);
@@ -1638,9 +1638,9 @@ process_begin(struct context *ctx, unsigned flags)
             /* window resize */
             struct box *root = ctx->tree;
             in->resized = 0;
-            root->local.w = root->screen.w = in->width;
-            root->local.h = root->screen.h = in->height;
-            if (root->local.w != in->width || root->local.h != in->height)
+            root->loc.w = root->scr.w = in->width;
+            root->loc.h = root->scr.h = in->height;
+            if (root->loc.w != in->width || root->loc.h != in->height)
                 jmpto(ctx, STATE_BLUEPRINT);
         } operation_begin(p, PROC_INPUT, ctx, &ctx->arena);
         p->input.state = in;
@@ -1659,7 +1659,7 @@ process_begin(struct context *ctx, unsigned flags)
                 struct box *prev = last;
                 struct box *cur = ctx->hot;
 
-                {const struct rect *c = &cur->screen, *l = &prev->screen;
+                {const struct rect *c = &cur->scr, *l = &prev->scr;
                 cur->entered = !inbox(lx, ly, c->x, c->y, c->w, c->h);
                 prev->exited = !inbox(mx, my, l->x, l->y, l->w, l->h);}
 
@@ -1668,7 +1668,7 @@ process_begin(struct context *ctx, unsigned flags)
                 evt->entered.cur = ctx->hot;
                 evt->entered.last = last;
                 while ((prev = prev->parent)) {
-                    const struct rect *l = &prev->screen;
+                    const struct rect *l = &prev->scr;
                     int was = inbox(lx, ly, l->x, l->y, l->w, l->h);
                     int isnt = !inbox(mx, my, l->x, l->y, l->w, l->h);
                     prev->exited = was && isnt;
@@ -1680,7 +1680,7 @@ process_begin(struct context *ctx, unsigned flags)
                 evt->exited.cur = ctx->hot;
                 evt->exited.last = last;
                 while ((cur = cur->parent)) {
-                    const struct rect *c = &cur->screen;
+                    const struct rect *c = &cur->scr;
                     int wasnt = !inbox(lx, ly, c->x, c->y, c->w, c->h);
                     int is = inbox(mx, my, c->x, c->y, c->w, c->h);
                     cur->entered = wasnt && is;
@@ -1697,9 +1697,9 @@ process_begin(struct context *ctx, unsigned flags)
                 if ((a->flags & BOX_MOVABLE_X) || (a->flags & BOX_MOVABLE_Y)) {
                     a->moved = 1;
                     if (a->flags & BOX_MOVABLE_X)
-                        a->local.x += in->mouse.dx;
+                        a->loc.x += in->mouse.dx;
                     if (a->flags & BOX_MOVABLE_Y)
-                        a->local.y += in->mouse.dy;
+                        a->loc.y += in->mouse.dy;
                     ctx->unbalanced = 1;
 
                     evt = event_begin(p, EVT_MOVED, act = a);
@@ -2037,10 +2037,10 @@ compute(struct box *b, int pad)
     struct list_hook *i = 0;
     list_foreach(i, &b->lnks) {
         struct box *n = list_entry(i, struct box, node);
-        n->local.x = b->local.x + pad;
-        n->local.y = b->local.y + pad;
-        n->local.w = max(b->local.w - 2*pad, 0);
-        n->local.h = max(b->local.h - 2*pad, 0);
+        n->loc.x = b->loc.x + pad;
+        n->loc.y = b->loc.y + pad;
+        n->loc.w = max(b->loc.w - 2*pad, 0);
+        n->loc.h = max(b->loc.h - 2*pad, 0);
     }
 }
 intern void
@@ -2050,10 +2050,10 @@ layout_copy(struct box *b)
     list_foreach(i, &b->lnks) {
         struct box *n = 0;
         n = list_entry(i, struct box, node);
-        n->local.x = b->local.x;
-        n->local.y = b->local.y;
-        n->local.w = b->local.w;
-        n->local.h = b->local.h;
+        n->loc.x = b->loc.x;
+        n->loc.y = b->loc.y;
+        n->loc.w = b->loc.w;
+        n->loc.h = b->loc.h;
     }
 }
 intern void
@@ -2062,10 +2062,10 @@ layout_default(struct box *b)
     struct list_hook *i = 0;
     list_foreach(i, &b->lnks) {
         struct box *n = list_entry(i, struct box, node);
-        n->local.x = max(b->local.x, n->local.x);
-        n->local.y = max(b->local.y, n->local.y);
-        n->local.w = min(n->dw, (b->local.x+b->local.w)-n->local.x);
-        n->local.h = min(n->dh, (b->local.y+b->local.h)-n->local.y);
+        n->loc.x = max(b->loc.x, n->loc.x);
+        n->loc.y = max(b->loc.y, n->loc.y);
+        n->loc.w = min(n->dw, (b->loc.x+b->loc.w)-n->loc.x);
+        n->loc.h = min(n->dh, (b->loc.y+b->loc.h)-n->loc.y);
     }
 }
 api void
@@ -2099,19 +2099,19 @@ layout(union process *op, struct box *b)
         layout_default(b); break;
     case WIDGET_ROOT: {
         if (b == ctx->tree) {
-            b->local.w = ctx->input.width;
-            b->local.h = ctx->input.height;
+            b->loc.w = ctx->input.width;
+            b->loc.h = ctx->input.height;
             layout_copy(b);
         } else if (b == ctx->popup || b == ctx->contextual) {
             struct list_hook *i = 0;
             list_foreach(i, &b->lnks) {
                 struct box *n = list_entry(i, struct box, node);
                 if (n == ctx->contextual || n == ctx->unblocking) {
-                    n->local.w = b->local.w;
-                    n->local.h = b->local.h;
+                    n->loc.w = b->loc.w;
+                    n->loc.h = b->loc.h;
                 } else {
-                    n->local.w = min(n->dw, (b->local.x+b->local.w)-n->local.x);
-                    n->local.h = min(n->dh, (b->local.y+b->local.h)-n->local.y);
+                    n->loc.w = min(n->dw, (b->loc.x+b->loc.w)-n->loc.x);
+                    n->loc.h = min(n->dh, (b->loc.y+b->loc.h)-n->loc.y);
                 }
             }
         } else if (b == ctx->overlay || b == ctx->unblocking || b == ctx->blocking)
@@ -2124,11 +2124,11 @@ api void
 transform(union process *op, struct box *b)
 {
     struct list_hook *bi;
-    struct transform *tb = &b->scr;
+    struct transform *tb = &b->tscr;
     list_foreach(bi, &b->lnks) {
         struct box *sub = list_entry(bi, struct box, node);
-        transform_concat(&sub->scr, tb, &sub->loc);
-        transform_rect(&sub->screen, &sub->local, &sub->scr);
+        transform_concat(&sub->tscr, tb, &sub->tloc);
+        transform_rect(&sub->scr, &sub->loc, &sub->tscr);
     }
 }
 api void
