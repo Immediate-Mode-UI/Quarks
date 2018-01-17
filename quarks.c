@@ -133,11 +133,12 @@ struct component {
     const unsigned *tbl_vals;
     const unsigned *tbl_keys;
     const int tblcnt;
-    struct box *boxes;
-    int boxcnt;
-    struct box **bfs;
+
     struct module *module;
     struct repository *repo;
+    struct box *boxes;
+    struct box **bfs;
+    int boxcnt;
 };
 
 /* box */
@@ -1916,13 +1917,15 @@ process_begin(struct context *ctx, unsigned flags)
         else jmpto(ctx, STATE_DONE);
     }
     case STATE_SERIALIZE_BINARY: {
-        struct list_hook *si = 0;
         union process *p = &ctx->proc;
         FILE *fp = p->serial.file;
+
+        struct list_hook *si = 0;
         list_foreach(si, &ctx->states) {
             struct state *s = list_entry(si, struct state, hook);
             union param *op = &s->list->ops[s->op_begin];
             if (s->id != p->serial.id) continue;
+
             while (1) {
                 const struct opdef *def = opdefs + op->type;
                 switch (op->type) {
@@ -1949,21 +1952,31 @@ process_begin(struct context *ctx, unsigned flags)
         r = m->repo[m->repoid];
         if (!r) jmpto(ctx, STATE_DONE);
 
-        fprintf(fp, "const struct unsigned g_links[] = {0};\n");
         fprintf(fp, "const struct element g_elements[] = {\n");
         for (i = 0; i < r->boxcnt; ++i) {
             const struct box *b = r->boxes + i;
-            fprintf(fp, "    {%d, %u, %u, %u, %d, %d},\n",
-                b->type, b->id, b->parent->id, b->flags, b->cnt, 0);
+            fprintf(fp, "    {%d, %u, %u, %u},\n",
+                b->type, b->id, b->parent->id, b->flags);
         } fprintf(fp, "};\n");
+        fprintf(fp, "const unsigned g_tbl_keys[%d] = {\n    ", r->tbl.cnt);
+        for (i = 0; i < r->tbl.cnt; ++i) {
+            if (i && (i & 0x0F)) fprintf(fp, "\n    ");
+            fprintf(fp, "%u", r->tbl.keys[i]);
+        } fprintf(fp, "\n};\n");
+        fprintf(fp, "const unsigned g_tbl_vals[%d] = {\n    ", r->tbl.cnt);
+        for (i = 0; i < r->tbl.cnt; ++i) {
+            if (i && (i & 0x0F)) fprintf(fp, "\n    ");
+            fprintf(fp, "%d", r->tbl.vals[i]);
+        } fprintf(fp, "\n};\n");
         fprintf(fp, "struct box g_boxes[%d];\n", r->boxcnt);
-        fprintf(fp, "unsigned g_tbl[%d];\n", r->tbl.cnt);
+        fprintf(fp, "struct box *g_bfs[%d];\n", r->boxcnt+1);
+        fprintf(fp, "struct repository g_repository;\n");
+        fprintf(fp, "struct module g_module;\n");
         fprintf(fp, "const struct component g_component = {\n");
         fprintf(fp, "    %d, \n", VERSION);
         fprintf(fp, "    g_elements, cntof(g_elements), \n");
-        fprintf(fp, "    g_links, cntof(g_links), \n");
-        fprintf(fp, "    g_boxes, cntof(g_boxes), \n");
-        fprintf(fp, "    g_tbl, cntof(g_tbl), %d \n", r->depth);
+        fprintf(fp, "    g_tbl_vals, g_tbl_keys, cntof(g_tbl), %d \n", r->depth);
+        fprintf(fp, "    g_module, g_repo, g_boxes, g_bfs, cntof(g_boxes)\n");
         fprintf(fp, "};\n");
 
         if (flags & flag(PROCESS_CLEAR))
@@ -2191,18 +2204,10 @@ create(const struct allocator *a)
     return ctx;
 }
 api void
-term(struct context *ctx)
-{
-    assert(ctx);
-    if (!ctx) return;
-    free_blocks(&ctx->blkmem);
-}
-api void
 destroy(struct context *ctx)
 {
     assert(ctx);
     if (!ctx) return;
-    term(ctx);
     qdealloc(&ctx->mem, ctx);
 }
 api void
@@ -2356,52 +2361,52 @@ button_end(struct state *s)
 int main(void)
 {
     int quit = 0;
-    struct context ctx;
+    struct context *ctx;
     SDL_Window *win = 0;
     SDL_Init(SDL_INIT_VIDEO);
     win = SDL_CreateWindow("GUI", SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED, 1000, 600, SDL_WINDOW_SHOWN);
 
-    init(&ctx, DEFAULT_ALLOCATOR);
+    ctx = create(DEFAULT_ALLOCATOR);
     while (!quit) {
         {SDL_Event evt;
         while (SDL_PollEvent(&evt)) {
             switch (evt.type) {
             case SDL_QUIT: quit = 1; break;
-            case SDL_MOUSEMOTION: input_motion(&ctx, evt.motion.x, evt.motion.y); break;
-            case SDL_MOUSEWHEEL: input_scroll(&ctx, evt.wheel.x, evt.wheel.y); break;
-            case SDL_TEXTINPUT: input_text(&ctx, txt(evt.text.text)); break;
+            case SDL_MOUSEMOTION: input_motion(ctx, evt.motion.x, evt.motion.y); break;
+            case SDL_MOUSEWHEEL: input_scroll(ctx, evt.wheel.x, evt.wheel.y); break;
+            case SDL_TEXTINPUT: input_text(ctx, txt(evt.text.text)); break;
             case SDL_WINDOWEVENT: {
                  if (evt.window.event == SDL_WINDOWEVENT_RESIZED ||
                     evt.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-                    input_resize(&ctx, evt.window.data1, evt.window.data2);
+                    input_resize(ctx, evt.window.data1, evt.window.data2);
             } break;
             case SDL_MOUSEBUTTONUP:
             case SDL_MOUSEBUTTONDOWN: {
                 int down = (evt.type == SDL_MOUSEBUTTONDOWN);
                 if (evt.button.button == SDL_BUTTON_LEFT)
-                    input_button(&ctx, MOUSE_BUTTON_LEFT, down);
+                    input_button(ctx, MOUSE_BUTTON_LEFT, down);
                 else if (evt.button.button == SDL_BUTTON_RIGHT)
-                    input_button(&ctx, MOUSE_BUTTON_RIGHT, down);
+                    input_button(ctx, MOUSE_BUTTON_RIGHT, down);
             } break;
             case SDL_KEYUP:
             case SDL_KEYDOWN: {
                 int down = (evt.type == SDL_KEYDOWN);
                 SDL_Keycode sym = evt.key.keysym.sym;
-                input_key(&ctx, sym, down);
+                input_key(ctx, sym, down);
             } break;}
         }}
 
         /* GUI */
         {struct state *s = 0;
-        if ((s = begin(&ctx, id("ui")))) {
+        if ((s = begin(ctx, id("ui")))) {
             button_begin(s);
             button_end(s);
         } end(s);}
 
         /* Update */
         {int i; union process *p = 0;
-        while ((p = process_begin(&ctx, PROCESS_INPUT|PROCESS_CLEAR))) {
+        while ((p = process_begin(ctx, PROCESS_INPUT|PROCESS_CLEAR))) {
             switch (p->type) {default: break;
             case PROC_ALLOC_FRAME:
             case PROC_ALLOC: p->mem.ptr = calloc(p->mem.size,1); break;
@@ -2447,7 +2452,6 @@ int main(void)
             } break;}
             process_end(p);
         }}
-    }
-    term(&ctx);
+    } destroy(ctx);
     return 0;
 }
