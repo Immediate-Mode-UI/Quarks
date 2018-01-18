@@ -157,6 +157,7 @@ struct box {
     unsigned id;
     int type;
     unsigned flags;
+    int params;
 
     /* transform */
     int dw, dh;
@@ -201,6 +202,8 @@ struct repository {
     struct box *boxes;
     struct box **bfs;
     int boxcnt, depth;
+    union param *params;
+    int argcnt;
     int size;
 };
 struct param_buffer {
@@ -214,6 +217,7 @@ struct state {
     struct repository *repo;
     struct list_hook hook;
 
+    int argcnt;
     int tblcnt;
     int tree_depth;
     int boxcnt;
@@ -367,6 +371,11 @@ struct process_input {
     struct input *state;
     struct list_hook evts;
 };
+struct process_paint {
+    struct process_header hdr;
+    struct box **boxes;
+    int cnt;
+};
 struct process_serialize {
     struct process_header hdr;
     enum serialization_type type;
@@ -379,6 +388,7 @@ union process {
     struct process_memory mem;
     struct process_layouting layout;
     struct process_input input;
+    struct process_paint paint;
     struct process_serialize serial;
 };
 
@@ -482,6 +492,11 @@ api void widget_box_pop(struct state *s);
 api unsigned widget_box(struct state *s);
 api void widget_end(struct state *s);
 
+api void widget_push_float(struct state *s, float f);
+api void widget_push_int(struct state *s, int i);
+api void widget_push_uint(struct state *s, unsigned u);
+api void widget_push_id(struct state *s, unsigned id);
+
 /* box */
 api void box_shrink(struct box *d, const struct box *s, int pad);
 api void measure(struct box *b, int pad);
@@ -551,6 +566,10 @@ static const struct component g_root = {
     OP(WIDGET_END,      0,  "")  \
     OP(BOX_PUSH,        1,  "%u")\
     OP(BOX_POP,         0,  "")\
+    OP(PUSH_FLOAT,      1,  "f")\
+    OP(PUSH_INT,        1,  "%d")\
+    OP(PUSH_UINT,       1,  "%u")\
+    OP(PUSH_ID,         1,  "%u")\
     OP(NEXT_BUF,        0,  "")\
     OP(EOF,             0,  "")
 enum opcodes {
@@ -587,6 +606,36 @@ ceili(float x)
         int i = cast(int,x);
         return (x > i) ? (i+1): i;
     }
+}
+intern float
+roundf(float x)
+{
+    int e = 0;
+    float y = 0;
+    static const float toint = 1.0f/(1.1920928955078125e-07F);
+    union {float f; unsigned long i;} u;
+
+    u.f = x;
+    e = (u.i >> 23) & 0xff;
+    if (e >= 0x7f+23) return x;
+    if (u.i >> 31) x = -x;
+    if (e < 0x7f-1)
+        return 0*u.f;
+
+    y = x + toint - toint - x;
+    if (y > 0.5f)
+        y = y + x - 1;
+    else if (y <= -0.5f)
+        y = y + x + 1;
+    else y = y + x;
+    if (u.i >> 31)
+        y = -y;
+    return y;
+}
+intern int
+roundi(float x)
+{
+    return cast(int, roundf(x));
 }
 intern int
 size_add_valid(int a, int b)
@@ -1068,7 +1117,7 @@ module_end(struct state *s)
 api struct state*
 begin(struct context *ctx, unsigned id)
 {
-    return module_begin(ctx, id, 0, WIDGET_UI);
+    return module_begin(ctx, id, 0, WIDGET_UI-WIDGET_LAYER_BEGIN);
 }
 api void
 end(struct state *s)
@@ -1118,7 +1167,8 @@ widget_box_push(struct state *s)
     p[1].id = genid(s);
     op_add(s, p, cntof(p));
 
-    s->tree_depth = max(s->depth++, s->tree_depth);
+    s->depth++;
+    s->tree_depth = max(s->depth, s->tree_depth);
     s->boxcnt++;
     return p[1].id;
 }
@@ -1138,6 +1188,44 @@ widget_box(struct state *s)
     id = widget_box_push(s);
     widget_box_pop(s);
     return id;
+}
+intern void
+widget_push(struct state *s, union param *p, int cnt)
+{
+    s->param_cnt++;
+    op_add(s, p, cnt);
+}
+api void
+widget_push_float(struct state *s, float f)
+{
+    union param p[2];
+    p[0].op = OP_PUSH_FLOAT;
+    p[1].f = f;
+    widget_push(s, p, cntof(p));
+}
+api void
+widget_push_int(struct state *s, int i)
+{
+    union param p[2];
+    p[0].op = OP_PUSH_INT;
+    p[1].i = i;
+    widget_push(s, p, cntof(p));
+}
+api void
+widget_push_uint(struct state *s, unsigned u)
+{
+    union param p[2];
+    p[0].op = OP_PUSH_UINT;
+    p[1].u = u;
+    widget_push(s, p, cntof(p));
+}
+api void
+widget_push_id(struct state *s, unsigned id)
+{
+    union param p[2];
+    p[0].op = OP_PUSH_ID;
+    p[1].id = id;
+    widget_push(s, p, cntof(p));
 }
 api void
 widget_end(struct state *s)
@@ -1209,6 +1297,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
     m->root = c->boxes;
     m->repo[m->repoid] = c->repo;
     list_init(&m->hook);
+    list_add_tail(&ctx->mod, &m->hook);
 
     zero(repo, szof(*repo));
     repo->depth = c->depth;
@@ -1220,7 +1309,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
     repo->tbl.vals = cast(int*, c->tbl_vals);
 
     for (i = 0; i < c->elmcnt; ++i) {
-        const struct element *e = c->elms;
+        const struct element *e = c->elms + i;
         struct box *b = c->boxes + lookup(&repo->tbl, e->id);
         struct box *p = c->boxes + lookup(&repo->tbl, e->parent);
 
@@ -1306,7 +1395,8 @@ event_end(union event *evt)
 intern struct list_hook*
 it(struct list_hook *list, struct list_hook *iter)
 {
-    if (iter && iter->next == list)
+    if (list_empty(list)) return 0;
+    else if (iter && iter->next == list)
         iter = 0;
     else if (!iter)
         iter = list->next;
@@ -1316,7 +1406,8 @@ it(struct list_hook *list, struct list_hook *iter)
 intern struct list_hook*
 itr(struct list_hook *list, struct list_hook *iter)
 {
-    if (iter && iter->prev == list)
+    if (list_empty(list)) return 0;
+    else if (iter && iter->prev == list)
         iter = 0;
     else if (!iter)
         iter = list->prev;
@@ -1331,6 +1422,7 @@ process_begin(struct context *ctx, unsigned flags)
     static const int int_align = alignof(int);
     static const int ptr_align = alignof(void*);
     static const int box_align = alignof(struct box);
+    static const int param_align = alignof(union param);
     static const int repo_align = alignof(struct repository);
 
     /* repository member object size */
@@ -1338,6 +1430,7 @@ process_begin(struct context *ctx, unsigned flags)
     static const int ptr_size = szof(void*);
     static const int uint_size = szof(unsigned);
     static const int box_size = szof(struct box);
+    static const int param_size = szof(union param);
     static const int repo_size = szof(struct repository);
 
     #define jmpto(ctx,s) do{(ctx)->state = (s); goto r;}while(0)
@@ -1377,6 +1470,13 @@ process_begin(struct context *ctx, unsigned flags)
         union process *p = &ctx->proc;
         ctx->iter = it(&ctx->states, ctx->iter);
         if (!ctx->iter) {
+            /* free states */
+            struct list_hook *si = 0;
+            list_foreach(si, &ctx->states) {
+                s = list_entry(si, struct state, hook);
+                arena_clear(&s->arena);
+            } list_init(&ctx->states);
+
             /* state transition table */
             if (flags & flag(PROC_BLUEPRINT))
                 jmpto(ctx, STATE_BLUEPRINT);
@@ -1406,7 +1506,8 @@ process_begin(struct context *ctx, unsigned flags)
         zero(m, szof(*m));
         list_init(&m->hook);
         m->id = s->id;
-        s->mod = m;}
+        s->mod = m;
+        list_add_tail(&ctx->mod, &m->hook);}
 
         jmpto(ctx, STATE_CALC_REQ_MEMORY);
         return p;
@@ -1421,7 +1522,7 @@ process_begin(struct context *ctx, unsigned flags)
         s->tblcnt = npow2(s->tblcnt);
 
         /* calculate required memory */
-        p->mem.size += box_align;
+        p->mem.size = box_align + param_align;
         p->mem.size += repo_size + repo_align;
         p->mem.size += int_align + uint_align;
         p->mem.size += ptr_size * (s->boxcnt + 1);
@@ -1429,6 +1530,7 @@ process_begin(struct context *ctx, unsigned flags)
         p->mem.size += uint_size * s->boxcnt;
         p->mem.size += uint_size * s->tblcnt;
         p->mem.size += int_size * s->tblcnt;
+        p->mem.size += param_size * s->argcnt;
         jmpto(ctx, STATE_ALLOC_TEMPORARY);
     }
     case STATE_ALLOC_TEMPORARY: {
@@ -1444,6 +1546,7 @@ process_begin(struct context *ctx, unsigned flags)
 
         struct repository *old = m->repo[m->repoid];
         struct repository *repo = p->mem.ptr;
+        zero(repo, szof(repo));
         m->repoid = !m->repoid;
         m->repo[m->repoid] = repo;
 
@@ -1454,6 +1557,7 @@ process_begin(struct context *ctx, unsigned flags)
         repo->tbl.cnt = s->tblcnt;
         repo->tbl.keys = (unsigned*)align(repo->bfs + repo->boxcnt + 1, uint_align);
         repo->tbl.vals = (int*)align(repo->tbl.keys + repo->tbl.cnt, int_align);
+        repo->params = (union param*)align(repo->tbl.vals + repo->tbl.cnt, param_align);
         repo->depth = s->depth + 1;
         repo->boxcnt = 1;
 
@@ -1462,9 +1566,10 @@ process_begin(struct context *ctx, unsigned flags)
         list_init(&m->root->lnks);
         transform_init(&m->root->tloc);
         transform_init(&m->root->tscr);
+        m->root->type = WIDGET_PANEL;
 
         /* II.) Setup repository data */
-        {int type = 0, depth = 1;
+        {int type = WIDGET_ROOT, depth = 1, params = 0;
         struct param_buffer *ob = s->list;
         union param *op = &ob->ops[s->op_begin];
         struct box *boxstk[MAX_TREE_DEPTH]; boxstk[0] = repo->boxes;
@@ -1473,9 +1578,19 @@ process_begin(struct context *ctx, unsigned flags)
             case OP_BUF_END:
                 goto eol0;
             case OP_WIDGET_BEGIN:
-                type = op[1].type; break;
+                type = op[1].type;
+                params = repo->argcnt;
+                break;
+            case OP_PUSH_FLOAT:
+                repo->params[repo->argcnt++].f = op[1].f; break;
+            case OP_PUSH_INT:
+                repo->params[repo->argcnt++].i = op[1].i; break;
+            case OP_PUSH_UINT:
+                repo->params[repo->argcnt++].u = op[1].u; break;
+            case OP_PUSH_ID:
+                repo->params[repo->argcnt++].id = op[1].id; break;
             case OP_WIDGET_END:
-                type = 0; break;
+                type = WIDGET_ROOT; break;
             case OP_BOX_POP:
                 assert(depth > 1); depth--; break;
             case OP_NEXT_BUF:
@@ -1544,6 +1659,7 @@ process_begin(struct context *ctx, unsigned flags)
                 b->type = type;
                 b->parent = pb;
                 b->depth = depth;
+                b->params = params;
 
                 /* link box into parent */
                 list_init(&b->node);
@@ -1852,7 +1968,7 @@ process_begin(struct context *ctx, unsigned flags)
             } ctx->state = STATE_PAINT;
         } else if (flags & flag(PROC_SERIALIZE))
             ctx->state = STATE_SERIALIZE;
-        else if (flags & flag(PROCESS_CLEAR))
+        else if (flags & flag(PROC_CLEAR))
             ctx->state = STATE_CLEAR;
         else ctx->state = STATE_DONE;
         return p;
@@ -1955,26 +2071,28 @@ process_begin(struct context *ctx, unsigned flags)
         fprintf(fp, "const struct element g_elements[] = {\n");
         for (i = 0; i < r->boxcnt; ++i) {
             const struct box *b = r->boxes + i;
-            fprintf(fp, "    {%d, %u, %u, %u},\n",
-                b->type, b->id, b->parent->id, b->flags);
+            const struct box *pb = b->parent;
+            unsigned pid = pb ? pb->id: 0;
+            fprintf(fp, "    {%d, %u, %u, %u},\n", b->type, b->id, pid, b->flags);
         } fprintf(fp, "};\n");
         fprintf(fp, "const unsigned g_tbl_keys[%d] = {\n    ", r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
-            if (i && (i & 0x0F)) fprintf(fp, "\n    ");
+            if (i && !(i & 0x0F)) fprintf(fp, "\n    ");
             fprintf(fp, "%u", r->tbl.keys[i]);
+            if (i < r->tbl.cnt-1) fputc(',', fp);
         } fprintf(fp, "\n};\n");
         fprintf(fp, "const unsigned g_tbl_vals[%d] = {\n    ", r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
-            if (i && (i & 0x0F)) fprintf(fp, "\n    ");
+            if (i && !(i & 0x0F)) fprintf(fp, "\n    ");
             fprintf(fp, "%d", r->tbl.vals[i]);
+            if (i < r->tbl.cnt-1) fputc(',', fp);
         } fprintf(fp, "\n};\n");
-        fprintf(fp, "struct box g_boxes[%d];\n", r->boxcnt);
         fprintf(fp, "struct box *g_bfs[%d];\n", r->boxcnt+1);
+        fprintf(fp, "struct box g_boxes[%d];\n", r->boxcnt);
         fprintf(fp, "struct repository g_repository;\n");
         fprintf(fp, "struct module g_module;\n");
         fprintf(fp, "const struct component g_component = {\n");
-        fprintf(fp, "    %d, \n", VERSION);
-        fprintf(fp, "    g_elements, cntof(g_elements), \n");
+        fprintf(fp, "    %d, g_elements, cntof(g_elements),\n", VERSION);
         fprintf(fp, "    g_tbl_vals, g_tbl_keys, cntof(g_tbl), %d \n", r->depth);
         fprintf(fp, "    g_module, g_repo, g_boxes, g_bfs, cntof(g_boxes)\n");
         fprintf(fp, "};\n");
@@ -1987,15 +2105,9 @@ process_begin(struct context *ctx, unsigned flags)
         struct module *m = 0;
         union process *p = &ctx->proc;
         if (list_empty(&ctx->garbage)) {
-            struct list_hook *si = 0;
-            list_foreach(si, &ctx->states) {
-                struct state *s = list_entry(si, struct state, hook);
-                arena_clear(&s->arena);
-            }
             list_init(&ctx->garbage);
             arena_clear(&ctx->arena);
-            list_init(&ctx->states);
-            if (flags & PROCESS_FULL_CLEAR)
+            if (flags & flag(PROC_FULL_CLEAR))
                 free_blocks(&ctx->blkmem);
             jmpto(ctx, STATE_DONE);
         }
@@ -2075,10 +2187,8 @@ blueprint(union process *op, struct box *b)
     if (b->type & WIDGET_INTERNAL_BEGIN) {
         switch (b->type) {
         case WIDGET_ROOT: {
-            if (b == ctx->tree) {
-                b->dw = ctx->input.width;
-                b->dh = ctx->input.height;
-            }
+            b->dw = ctx->input.width;
+            b->dh = ctx->input.height;
         } break;
         case WIDGET_PANEL:
         case WIDGET_SLOT: {
@@ -2097,27 +2207,30 @@ layout(union process *op, struct box *b)
     case WIDGET_PANEL:
     case WIDGET_SLOT:
         layout_default(b); break;
-    case WIDGET_ROOT: {
-        if (b == ctx->tree) {
-            b->loc.w = ctx->input.width;
-            b->loc.h = ctx->input.height;
-            layout_copy(b);
-        } else if (b == ctx->popup || b == ctx->contextual) {
-            struct list_hook *i = 0;
-            list_foreach(i, &b->lnks) {
-                struct box *n = list_entry(i, struct box, node);
-                if (n == ctx->contextual || n == ctx->unblocking) {
-                    n->loc.w = b->loc.w;
-                    n->loc.h = b->loc.h;
-                } else {
-                    n->loc.w = min(n->dw, (b->loc.x+b->loc.w)-n->loc.x);
-                    n->loc.h = min(n->dh, (b->loc.y+b->loc.h)-n->loc.y);
-                }
+    case WIDGET_ROOT:
+        b->loc.w = ctx->input.width;
+        b->loc.h = ctx->input.height;
+        layout_copy(b);
+        break;
+    case WIDGET_OVERLAY:
+    case WIDGET_UNBLOCKING:
+    case WIDGET_BLOCKING:
+        layout_copy(b); break;
+    case WIDGET_UI:
+        layout_default(b); break;
+    case WIDGET_POPUP:
+    case WIDGET_CONTEXTUAL: {
+        struct list_hook *i = 0;
+        list_foreach(i, &b->lnks) {
+            struct box *n = list_entry(i, struct box, node);
+            if (n != ctx->contextual && n != ctx->unblocking) {
+                n->loc.w = min(n->dw, (b->loc.x+b->loc.w)-n->loc.x);
+                n->loc.h = min(n->dh, (b->loc.y+b->loc.h)-n->loc.y);
+            } else {
+                n->loc.w = b->loc.w;
+                n->loc.h = b->loc.h;
             }
-        } else if (b == ctx->overlay || b == ctx->unblocking || b == ctx->blocking)
-            layout_copy(b);
-        else if (b == ctx->ui)
-            layout_default(b);
+        }
     } break;}
 }
 api void
@@ -2137,9 +2250,8 @@ input(union process *op, union event *evt, struct box *b)
     struct context *ctx = op->hdr.ctx;
     if (!(b->type & WIDGET_INTERNAL_BEGIN)) return;
     switch (b->type) {
-    case WIDGET_ROOT: {
-        if (b != ctx->unblocking) return;
-        {struct list_hook *i = 0;
+    case WIDGET_UNBLOCKING: {
+        struct list_hook *i = 0;
         struct box *contextual = 0;
 
         if (evt->hdr.origin != b) break;
@@ -2152,7 +2264,7 @@ input(union process *op, union event *evt, struct box *b)
             struct box *c = list_entry(i,struct box,node);
             if (c == b) continue;
             c->hidden = 1;
-        }}
+        }
     } break;}
 }
 api void
@@ -2164,12 +2276,15 @@ init(struct context *ctx, const struct allocator *a)
     a = (a) ? a: &default_allocator;
     zero(ctx, szof(*ctx));
 
+    /* setup allocators */
     ctx->mem = *a;
     ctx->blkmem.mem = &ctx->mem;
     ctx->arena.mem = &ctx->blkmem;
     block_alloc_init(&ctx->blkmem);
 
+    /* persistent state list */
     list_init(&ctx->mod);
+    list_init(&ctx->states);
     list_init(&ctx->garbage);
     list_init(&ctx->freelist);
 
@@ -2177,12 +2292,13 @@ init(struct context *ctx, const struct allocator *a)
     {struct component root;
     memcpy(&root, &g_root, sizeof(root));
     root.boxes = ctx->boxes;
-    root.boxcnt = WIDGET_LAYER_BEGIN - WIDGET_LAYER_END;
+    root.boxcnt = cntof(g_root_elements);
     root.module = &ctx->root;
     root.repo = &ctx->repo;
     root.bfs = ctx->bfs;
     load(ctx, 0, &root);}
 
+    /* setup fast access root boxes pointers */
     ctx->tree = ctx->boxes + (WIDGET_ROOT - WIDGET_LAYER_BEGIN);
     ctx->overlay = ctx->boxes + (WIDGET_OVERLAY - WIDGET_LAYER_BEGIN);
     ctx->popup = ctx->boxes + (WIDGET_POPUP - WIDGET_LAYER_BEGIN);
@@ -2191,6 +2307,7 @@ init(struct context *ctx, const struct allocator *a)
     ctx->blocking = ctx->boxes + (WIDGET_BLOCKING - WIDGET_LAYER_BEGIN);
     ctx->ui = ctx->boxes + (WIDGET_UI - WIDGET_LAYER_BEGIN);
 
+    /* setup tree module */
     ctx->active = ctx->boxes;
     ctx->origin = ctx->boxes;
     ctx->hot = ctx->boxes;
@@ -2201,6 +2318,7 @@ create(const struct allocator *a)
     struct context *ctx = 0;
     a = (a) ? a: &default_allocator;
     ctx = qalloc(a, szof(*ctx));
+    init(ctx, a);
     return ctx;
 }
 api void
@@ -2326,6 +2444,7 @@ input_rune(struct context *ctx, unsigned long r)
  * =========================================================================== */
 enum widget_type {
     WIDGET_BUTTON,
+    WIDGET_SLIDER,
     WIDGET_TYPE_COUNT
 };
 static unsigned
@@ -2339,7 +2458,71 @@ button_end(struct state *s)
 {
     widget_end(s);
 }
+static unsigned
+slider(struct state *s, float min, float *value, float max)
+{
+    unsigned sid = 0, cid = 0;
+    widget_begin(s, WIDGET_BUTTON);
+    sid = widget_box_push(s);
+        cid = widget_box(s);
+    widget_box_pop(s);
+    widget_push_float(s, min);
+    widget_push_float(s, *value);
+    widget_push_float(s, max);
+    widget_push_id(s, cid);
+    widget_end(s);
+    return sid;
+}
+api void
+slider_blueprint(struct box *b, const union param *args)
+{
+    static const cursor_size = 8;
+    if (b->id == args[3].id) {
+        measure(b, 0);
+        b->dw = max(b->dw, cursor_size);
+        b->dh = max(b->dh, cursor_size);
+    } else measure(b, 0);
+}
+api void
+slider_layout(struct box *b, const union param *args)
+{
+    if (b->id != args[3].id)
+        {compute(b, 0); return;}
 
+    {const struct box *p = b->parent;
+    float sld_min = min(args[0].f, args[2].f);
+    float sld_max = max(args[0].f, args[2].f);
+    float sld_val = clamp(sld_min, args[1].f, sld_max);
+    float cur_off = (sld_val - sld_min) / sld_max;
+
+    static const cursor_size = 8;
+    int x = p->loc.x + cursor_size/2;
+    int w = p->loc.w - cursor_size;
+
+    b->loc.h = 16;
+    b->loc.w = cursor_size;
+    b->loc.x = x + roundi(w * cur_off) - cursor_size/2;
+    b->loc.y = p->loc.y + p->loc.h/2 - b->loc.h/2;}
+}
+api void
+slider_input(struct box *b, const union param *args, const union event *evt)
+{
+    struct box *p = b->parent;
+    if (b->id != args[3].id)
+        {compute(b, 0); return;}
+    if (!b->moved || evt->type != EVT_MOVED)
+        return;
+
+    {float sld_min = min(args[0].f, args[2].f);
+    float sld_max = max(args[0].f, args[2].f);
+    b->loc.x = min(p->loc.x+p->loc.w-b->loc.w, b->loc.x);
+    b->loc.x = max(p->loc.x, b->loc.x);
+
+    {static const cursor_size = 8;
+    int x = p->loc.x, w = p->loc.w - cursor_size;
+    args[1].f = cast(float,(b->loc.x - x)) / cast(float,w);
+    args[1].f = (args[1].f * sld_max) + sld_min;}}
+}
 /* ===========================================================================
  *
  *                                  CANVAS
@@ -2368,6 +2551,7 @@ int main(void)
         SDL_WINDOWPOS_CENTERED, 1000, 600, SDL_WINDOW_SHOWN);
 
     ctx = create(DEFAULT_ALLOCATOR);
+    input_resize(ctx, 1000, 600);
     while (!quit) {
         {SDL_Event evt;
         while (SDL_PollEvent(&evt)) {
@@ -2404,9 +2588,11 @@ int main(void)
             button_end(s);
         } end(s);}
 
-        /* Update */
+        /* ---------------------------------------------------------------------*/
+        /* Process: Input                                                       */
+        /* ---------------------------------------------------------------------*/
         {int i; union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_INPUT|PROCESS_CLEAR))) {
+        while ((p = process_begin(ctx, PROCESS_INPUT))) {
             switch (p->type) {default: break;
             case PROC_ALLOC_FRAME:
             case PROC_ALLOC: p->mem.ptr = calloc(p->mem.size,1); break;
@@ -2452,6 +2638,49 @@ int main(void)
             } break;}
             process_end(p);
         }}
-    } destroy(ctx);
+#if 0
+        /* ---------------------------------------------------------------------*/
+        /* Process: Serialize                                                   */
+        /* ---------------------------------------------------------------------*/
+        {union process *p = 0;
+        while ((p = process_begin(ctx, PROCESS_SERIALIZE))) {
+            struct process_serialize *serial = &p->serial;
+            if (p->type != PROC_FILL_SERIAL_CONFIG) break;
+            serial->type = SERIALIZE_TABLES;
+            serial->id = id("ui");
+            serial->file = stdout;
+            process_end(p);
+        }}
+        /* ---------------------------------------------------------------------*/
+        /* Process: Paint                                                       */
+        /* ---------------------------------------------------------------------*/
+        {int i = 0; union process *p = 0;
+        while ((p = process_begin(ctx, PROCESS_PAINT))) {
+            struct process_paint *op = &p->paint;
+            if (p->type != PROC_PAINT) break;
+            for (i = 0; i < op->cnt; ++i) {
+
+            } process_end(p);
+        }}
+#endif
+        /* ---------------------------------------------------------------------*/
+        /* Process: Clear                                                       */
+        /* ---------------------------------------------------------------------*/
+        {union process *p = 0;
+        while ((p = process_begin(ctx, PROCESS_CLEAR))) {
+            if (p->type != PROC_FREE) break;
+            free(p->mem.ptr);
+            process_end(p);
+        }}
+    }
+    /* ---------------------------------------------------------------------*/
+    /* Process: Cleanup                                                     */
+    /* ---------------------------------------------------------------------*/
+    {union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_CLEANUP))) {
+        if (p->type != PROC_FREE || p->type != PROC_FREE_FRAME) break;
+        free(p->mem.ptr);
+        process_end(p);
+    }} destroy(ctx);
     return 0;
 }
