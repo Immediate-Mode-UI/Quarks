@@ -566,7 +566,7 @@ static const struct component g_root = {
     OP(WIDGET_END,      0,  "")  \
     OP(BOX_PUSH,        1,  "%u")\
     OP(BOX_POP,         0,  "")\
-    OP(PUSH_FLOAT,      1,  "f")\
+    OP(PUSH_FLOAT,      1,  "%f")\
     OP(PUSH_INT,        1,  "%d")\
     OP(PUSH_UINT,       1,  "%u")\
     OP(PUSH_ID,         1,  "%u")\
