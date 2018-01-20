@@ -113,6 +113,7 @@ union param {
     int i;
     unsigned u;
     unsigned id;
+    unsigned flags;
     float f;
     void *p;
 };
@@ -124,6 +125,7 @@ struct element {
     unsigned parent;
     unsigned wid;
     unsigned flags;
+    unsigned params;
 };
 struct component {
     unsigned version;
@@ -146,14 +148,25 @@ struct component {
 /* box */
 struct rect {int x,y,w,h;};
 struct transform {int x,y; float sx,sy;};
+#define PROPERTY_MAP(PROP)\
+    PROP(INTERACTIVE)\
+    PROP(MOVABLE_X)\
+    PROP(MOVABLE_Y)\
+    PROP(BACKGROUND)\
+    PROP(UNIFORM)\
+    PROP(SELECTABLE)\
+    PROP(HIDDEN)
+enum property_index {
+#define PROP(p) BOX_ ## p ## _INDEX,
+    PROPERTY_MAP(PROP)
+#undef PROP
+    PROPERT_INDEX_MAX
+};
 enum properties {
-    BOX_INTERACTIVE = flag(0),
-    BOX_MOVABLE_X   = flag(1),
-    BOX_MOVABLE_Y   = flag(2),
-    BOX_BACKGROUND  = flag(3),
-    BOX_UNIFORM     = flag(4),
-    BOX_SELECTABLE  = flag(5),
-    BOX_HIDDEN      = flag(6)
+#define PROP(p) BOX_ ## p = flag(BOX_ ## p ## _INDEX),
+    PROPERTY_MAP(PROP)
+#undef PROP
+    PROPERT_ALL
 };
 struct box {
     unsigned id;
@@ -417,7 +430,6 @@ enum widget_internal {
     WIDGET_BLOCKING,
     WIDGET_UI,
     WIDGET_LAYER_END = WIDGET_UI,
-
     /* widgets */
     WIDGET_PANEL,
     WIDGET_POPUP_PANEL,
@@ -498,9 +510,9 @@ api void slot(struct state *s, unsigned id);
 
 /* widget */
 api void widget_begin(struct state *s, int type);
-api unsigned widget_box_push(struct state *s);
+api unsigned widget_box_push(struct state *s, unsigned flags);
 api void widget_box_pop(struct state *s);
-api unsigned widget_box(struct state *s);
+api unsigned widget_box(struct state *s, unsigned flags);
 api void widget_end(struct state *s);
 
 api void widget_push_param_float(struct state *s, float f);
@@ -579,7 +591,7 @@ static const struct component g_root = {
     OP(BUF_END,         1,  "%u")\
     OP(WIDGET_BEGIN,    1,  "%d")\
     OP(WIDGET_END,      0,  "")  \
-    OP(BOX_PUSH,        1,  "%u %u")\
+    OP(BOX_PUSH,        3,  "%u %u %u")\
     OP(BOX_POP,         0,  "")\
     OP(PUSH_FLOAT,      1,  "%f")\
     OP(PUSH_INT,        1,  "%d")\
@@ -1098,6 +1110,18 @@ state_find(struct context *ctx, unsigned id)
         if (s->id == id) return s;
     } return 0;
 }
+intern struct module*
+module_find(struct context *ctx, unsigned id)
+{
+    struct list_hook *i = 0;
+    assert(ctx);
+    if (!ctx) return 0;
+    list_foreach(i, &ctx->mod) {
+        struct module *m = 0;
+        m = list_entry(i, struct module, hook);
+        if (m->id == id) return m;
+    } return 0;
+}
 api struct state*
 module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
 {
@@ -1110,6 +1134,8 @@ module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
     s->ctx = ctx;
     s->arena.mem = &ctx->blkmem;
     s->list = s->opbuf = arena_push(&s->arena, 1, szof(struct param_buffer), 0);
+    s->mod = module_find(ctx, id);
+    s->repo = !s->mod ? 0: s->mod->repo[s->mod->repoid];
     list_init(&s->hook);
     list_add_tail(&ctx->states, &s->hook);
     pushid(s, id);
@@ -1183,12 +1209,13 @@ widget_begin(struct state *s, int type)
     s->wtop++;
 }
 api unsigned
-widget_box_push(struct state *s)
+widget_box_push(struct state *s, unsigned flags)
 {
     union param p[2];
     p[0].op = OP_BOX_PUSH;
     p[1].id = genid(s);
     p[2].id = s->wstk[s->wtop-1].id;
+    p[3].flags = flags;
     op_add(s, p, cntof(p));
 
     s->depth++;
@@ -1206,10 +1233,10 @@ widget_box_pop(struct state *s)
     s->depth = max(s->depth-1, 0);
 }
 api unsigned
-widget_box(struct state *s)
+widget_box(struct state *s, unsigned flags)
 {
     unsigned id = 0;
-    id = widget_box_push(s);
+    id = widget_box_push(s, flags);
     widget_box_pop(s);
     return id;
 }
@@ -1298,25 +1325,15 @@ widget_end(struct state *s)
 api void
 slot(struct state *s, unsigned id)
 {
-    union param p[3];
+    union param p[5];
     widget_begin(s, WIDGET_SLOT);
     p[0].op = OP_BOX_PUSH;
     p[1].id = id;
-    p[2].op = OP_BOX_POP;
+    p[2].id = s->wstk[s->wtop-1].id;
+    p[3].flags = id;
+    p[4].op = OP_BOX_POP;
     op_add(s, p, cntof(p));
     widget_end(s);
-}
-intern struct module*
-module_find(struct context *ctx, unsigned id)
-{
-    struct list_hook *i = 0;
-    assert(ctx);
-    if (!ctx) return 0;
-    list_foreach(i, &ctx->mod) {
-        struct module *m = 0;
-        m = list_entry(i, struct module, hook);
-        if (m->id == id) return m;
-    } return 0;
 }
 intern struct box**
 bfs(struct box **buf, struct box *root)
@@ -1632,7 +1649,7 @@ process_begin(struct context *ctx, unsigned flags)
 
         /* II.) Setup repository data */
         {int type = WIDGET_ROOT;
-        int depth = 1, params = 0, wdepth = 0;
+        int depth = 1, params = 0;
         struct param_buffer *ob = s->list;
         union param *op = &ob->ops[s->op_begin];
 
@@ -1644,8 +1661,7 @@ process_begin(struct context *ctx, unsigned flags)
                 goto eol0;
             case OP_WIDGET_BEGIN:
                 type = op[1].type;
-                params = repo->argcnt;
-                break;
+                params = repo->argcnt; break;
             case OP_PUSH_FLOAT:
                 repo->params[repo->argcnt++].f = op[1].f; break;
             case OP_PUSH_INT:
@@ -1655,8 +1671,7 @@ process_begin(struct context *ctx, unsigned flags)
             case OP_PUSH_ID:
                 repo->params[repo->argcnt++].id = op[1].id; break;
             case OP_WIDGET_END:
-                type = WIDGET_ROOT;
-                wdepth--; break;
+                type = WIDGET_ROOT; break;
             case OP_BOX_POP:
                 assert(depth > 1); depth--; break;
             case OP_NEXT_BUF:
@@ -1720,13 +1735,15 @@ process_begin(struct context *ctx, unsigned flags)
                 {struct box *b = repo->boxes + idx;
                 transform_init(&b->tloc);
                 transform_init(&b->tscr);
+
                 b->id = id;
                 b->cnt = 0;
                 b->type = type;
                 b->parent = pb;
                 b->depth = depth;
-                b->params = repo->params + params;
                 b->wid = op[2].id;
+                b->flags = op[3].flags;
+                b->params = repo->params + params;
 
                 /* link box into parent */
                 list_init(&b->node);
@@ -1796,6 +1813,7 @@ process_begin(struct context *ctx, unsigned flags)
 
         ctx->iter = it(&ctx->mod, ctx->iter);
         if (!ctx->iter) {
+            ctx->unbalanced = 0;
             /* state transition table */
             if (flags & flag(PROC_INPUT))
                 jmpto(ctx, STATE_INPUT);
@@ -2124,7 +2142,13 @@ process_begin(struct context *ctx, unsigned flags)
         else jmpto(ctx, STATE_DONE);
     }
     case STATE_SERIALIZE_TABLE: {
-        const struct repository *r = 0;
+        static const struct property_def {
+            const char *name; int len;
+        } property_info[] = {
+            #define PROP(p) {"BOX_" #p, (cntof("BOX_" #p)-1)},
+                PROPERTY_MAP(PROP)
+            #undef PROP
+        }; const struct repository *r = 0;
         const union process *p = &ctx->proc;
         struct module *m = module_find(ctx, p->serial.id);
         FILE *fp = p->serial.file;
@@ -2138,8 +2162,15 @@ process_begin(struct context *ctx, unsigned flags)
             const struct box *b = r->boxes + i;
             const struct box *pb = b->parent;
             unsigned pid = pb ? pb->id: 0;
-            fprintf(fp, "    {%d, %u, %u, %u, %u},\n",
-                b->type, b->id, pid, b->wid, b->flags);
+            char buf[256]; int j, n = 0; buf[n++] = '0';
+            for (j = 0; j < PROPERT_INDEX_MAX; ++j) {
+                if (b->flags & flag(j)) {
+                    const struct property_def *pi = 0;
+                    pi = property_info + j;
+                    copy(buf+n, pi->name, pi->len);
+                    n += pi->len;
+                } buf[n] = 0;
+            } fprintf(fp, "    {%d, %u, %u, %u, %s},\n", b->type,b->id,pid,b->wid,buf);
         } fprintf(fp, "};\n");
         fprintf(fp, "const unsigned g_tbl_keys[%d] = {\n    ", r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
@@ -2350,7 +2381,7 @@ init(struct context *ctx, const struct allocator *a)
     ctx->arena.mem = &ctx->blkmem;
     block_alloc_init(&ctx->blkmem);
 
-    /* persistent state list */
+    /* list */
     list_init(&ctx->mod);
     list_init(&ctx->states);
     list_init(&ctx->garbage);
@@ -2507,7 +2538,7 @@ input_rune(struct context *ctx, unsigned long r)
 
 /* ===========================================================================
  *
- *                                  WIDGET
+ *                                  WIDGETS
  *
  * =========================================================================== */
 enum widget_type {
@@ -2519,7 +2550,7 @@ static unsigned
 button_begin(struct state *s)
 {
     widget_begin(s, WIDGET_BUTTON);
-    return widget_box(s);
+    return widget_box(s, BOX_INTERACTIVE);
 }
 static void
 button_end(struct state *s)
@@ -2540,8 +2571,8 @@ slider(struct state *s, float min, float *value, float max)
         widget_push_param_float(s, min);
         widget_push_modifier_float(s, value);
         widget_push_param_float(s, max);
-        sid = widget_box_push(s);
-            cid = widget_box(s);
+        sid = widget_box_push(s, BOX_INTERACTIVE);
+            cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X);
             widget_push_param_id(s, cid);
         widget_box_pop(s);
     widget_end(s);
