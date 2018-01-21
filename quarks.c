@@ -1350,17 +1350,19 @@ bfs(struct box **buf, struct box *root)
 api void
 call(struct context *ctx, unsigned id, const union param *op, int opcnt)
 {
-    int i = 0;
     static const int op_cnt[] = {
-        #define OP(a,b,c) b,
+    #define OP(a,b,c) b,
         OPCODES(OP) 0
-        #undef OP
+    #undef OP
     }; struct state *s = begin(ctx, id);
+    s->op_idx = 0;
+
+    {int i = 0;
     for (i = 0; i < opcnt; ++i) {
         const int cnt = op_cnt[op[i].op];
         op_add(s, op + i, cnt + 1);
         i += cnt + 1;
-    } end(s);
+    } end(s);}
 }
 api void
 load(struct context *ctx, unsigned id, const struct component *c)
