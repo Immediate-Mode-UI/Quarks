@@ -160,7 +160,7 @@ enum property_index {
 #define PROP(p) BOX_ ## p ## _INDEX,
     PROPERTY_MAP(PROP)
 #undef PROP
-    PROPERT_INDEX_MAX
+    PROPERTY_INDEX_MAX
 };
 enum properties {
 #define PROP(p) BOX_ ## p = flag(BOX_ ## p ## _INDEX),
@@ -2166,7 +2166,7 @@ process_begin(struct context *ctx, unsigned flags)
             const struct box *pb = b->parent;
             unsigned pid = pb ? pb->id: 0;
             char buf[256]; int j, n = 0; buf[n++] = '0';
-            for (j = 0; j < PROPERT_INDEX_MAX; ++j) {
+            for (j = 0; j < PROPERTY_INDEX_MAX; ++j) {
                 if (b->flags & flag(j)) {
                     const struct property_def *pi = 0;
                     pi = property_info + j;
