@@ -2941,10 +2941,6 @@ int main(void)
         {int i; union process *p = 0;
         while ((p = process_begin(ctx, PROCESS_LAYOUTING))) {
             switch (p->type) {default: break;
-            case PROC_ALLOC_FRAME:
-            case PROC_ALLOC: p->mem.ptr = calloc(p->mem.size,1); break;
-            case PROC_FREE_FRAME:
-            case PROC_FREE: free(p->mem.ptr); break;
             case PROC_BLUEPRINT: {
                 struct process_layouting *op = &p->layout;
                 for (i = op->begin; i != op->end; i += op->inc) {
