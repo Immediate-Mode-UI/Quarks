@@ -166,7 +166,7 @@ enum properties {
 #define PROP(p) BOX_ ## p = flag(BOX_ ## p ## _INDEX),
     PROPERTY_MAP(PROP)
 #undef PROP
-    PROPERT_ALL
+    PROPERTY_ALL
 };
 struct box {
     unsigned id;
