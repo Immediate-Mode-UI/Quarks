@@ -1157,6 +1157,7 @@ module_end(struct state *s)
     p[0].op = OP_BUF_END;
     p[1].id = s->id;
     op_add(s, p, cntof(p));
+    popid(s);
 }
 api struct state*
 begin(struct context *ctx, unsigned id)
@@ -1560,7 +1561,7 @@ process_begin(struct context *ctx, unsigned flags)
             } list_init(&ctx->states);
 
             /* state transition table */
-            if (flags & flag(PROC_BLUEPRINT))
+            if ((flags & flag(PROC_BLUEPRINT)) && ctx->unbalanced)
                 jmpto(ctx, STATE_BLUEPRINT);
             else if (flags & flag(PROC_INPUT))
                 jmpto(ctx, STATE_INPUT);
@@ -1760,6 +1761,7 @@ process_begin(struct context *ctx, unsigned flags)
             op += opdefs[op[0].op].argc + 1;
         } eol0:;}
         repo->bfs = bfs(repo->bfs, repo->boxes);
+        ctx->unbalanced = 1;
 
         /* III.) Free old repository */
         operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
@@ -2545,28 +2547,79 @@ input_rune(struct context *ctx, unsigned long r)
  *
  * =========================================================================== */
 enum widget_type {
+    WIDGET_ICON,
     WIDGET_BUTTON,
     WIDGET_SLIDER,
     WIDGET_TYPE_COUNT
 };
-static unsigned
+/* ---------------------------------------------------------------------------
+ *                                  ICON
+ * --------------------------------------------------------------------------- */
+enum icon_symbol {
+    ICON_CIRCLE_SOLID,
+    ICON_CIRCLE_OUTLINE,
+    ICON_RECT_SOLID,
+    ICON_RECT_OUTLINE,
+    ICON_TRIANGLE_UP,
+    ICON_TRIANGLE_DOWN,
+    ICON_TRIANGLE_LEFT,
+    ICON_TRIANGLE_RIGHT,
+    ICON_COUNT
+};
+api unsigned
+icon(struct state *s, enum icon_symbol sym)
+{
+    unsigned id = 0;
+    widget_begin(s, WIDGET_ICON);
+    widget_push_param_int(s, sym);
+    id = widget_box(s, BOX_INTERACTIVE);
+    widget_end(s);
+    return id;
+}
+api void
+icon_blueprint(struct box *b)
+{
+    static const icon_size = 16;
+    b->dw = icon_size;
+    b->dh = icon_size;
+}
+api void
+icon_layout(struct box *b)
+{
+    if (b->loc.w > b->loc.h) {
+        b->loc.x += (b->loc.w - b->loc.h) / 2;
+        b->loc.w = b->loc.h;
+    } else if (b->loc.h > b->loc.w) {
+        b->loc.y += (b->loc.h - b->loc.w) / 2;
+        b->loc.h = b->loc.w;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ *                                  BUTTON
+ * --------------------------------------------------------------------------- */
+api unsigned
 button_begin(struct state *s)
 {
     widget_begin(s, WIDGET_BUTTON);
-    return widget_box(s, BOX_INTERACTIVE);
+    return widget_box_push(s, BOX_INTERACTIVE);
 }
-static void
+api void
 button_end(struct state *s)
 {
+    widget_box_pop(s);
     widget_end(s);
 }
+/* ---------------------------------------------------------------------------
+ *                                  SLIDER
+ * --------------------------------------------------------------------------- */
 struct slider {
     float min;
     float *value;
     float max;
     unsigned cid;
 };
-static unsigned
+api unsigned
 slider(struct state *s, float min, float *value, float max)
 {
     unsigned sid = 0, cid = 0;
@@ -2715,7 +2768,7 @@ nvgSlider(struct NVGcontext *vg, struct box *b)
     float cy = p->scr.y+(int)(p->scr.h*0.5f);
     float kr = b->scr.h / 2;
     float sx = p->scr.x;
-    float cx = b->scr.x + b->scr.w;
+    float cx = b->scr.x + b->scr.w*0.5f;
     nvgSave(vg);
 
     /* Slot */
@@ -2748,6 +2801,71 @@ nvgSlider(struct NVGcontext *vg, struct box *b)
     nvgStrokeColor(vg, nvgRGBA(0,0,0,92));
     nvgStroke(vg);
     nvgRestore(vg);}
+}
+api void
+nvgIcon(struct NVGcontext *vg, struct box *b)
+{
+    int sym = b->params[0].i;
+    switch (sym) {
+    default: assert(0); break;
+    case ICON_CIRCLE_SOLID:
+    case ICON_CIRCLE_OUTLINE: {
+        float cx = b->scr.x + b->scr.w;
+        float cy = b->scr.y +(int)(b->scr.h*0.5f);
+        float kr = b->scr.h / 2;
+
+        nvgBeginPath(vg);
+        nvgCircle(vg, cx,cy, kr);
+        nvgFillColor(vg, nvgRGBA(200,200,200,255));
+        if (sym == ICON_CIRCLE_SOLID)
+            nvgFill(vg);
+        else nvgStroke(vg);
+    } break;
+    case ICON_RECT_SOLID:
+    case ICON_RECT_OUTLINE: {
+        nvgBeginPath(vg);
+        nvgRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h);
+        nvgFillColor(vg, nvgRGBA(200,200,200,255));
+        if (sym == ICON_RECT_SOLID)
+            nvgFill(vg);
+        else nvgStroke(vg);
+    } break;
+    case ICON_TRIANGLE_UP: {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, b->scr.x + b->scr.w*0.5f, b->scr.y);
+        nvgLineTo(vg, b->scr.x, b->scr.y + b->scr.h);
+        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvgRGBA(200,200,200,255));
+        nvgFill(vg);
+    } break;
+    case ICON_TRIANGLE_DOWN: {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, b->scr.x, b->scr.y);
+        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y);
+        nvgLineTo(vg, b->scr.x + b->scr.w*0.5f, b->scr.y + b->scr.h);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvgRGBA(200,200,200,255));
+        nvgFill(vg);
+    } break;
+    case ICON_TRIANGLE_LEFT: {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, b->scr.x, b->scr.y + b->scr.h * 0.5f);
+        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y);
+        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvgRGBA(200,200,200,255));
+        nvgFill(vg);
+    } break;
+    case ICON_TRIANGLE_RIGHT: {
+        nvgBeginPath(vg);
+        nvgMoveTo(vg, b->scr.x, b->scr.y);
+        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h * 0.5f);
+        nvgLineTo(vg, b->scr.x, b->scr.y + b->scr.h);
+        nvgClosePath(vg);
+        nvgFillColor(vg, nvgRGBA(200,200,200,255));
+        nvgFill(vg);
+    } break;};
 }
 int main(void)
 {
@@ -2804,10 +2922,22 @@ int main(void)
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
             button_begin(s);
+            icon(s, ICON_CIRCLE_OUTLINE);
             button_end(s);
         } end(s);}
 
-        /* Process: Layout */
+        /* Process: Commit */
+        {union process *p = 0;
+        while ((p = process_begin(ctx, PROCESS_COMMIT))) {
+            switch (p->type) {default: break;
+            case PROC_ALLOC_FRAME:
+            case PROC_ALLOC: p->mem.ptr = calloc(p->mem.size,1); break;
+            case PROC_FREE_FRAME:
+            case PROC_FREE: free(p->mem.ptr); break;}
+            process_end(p);
+        }}
+
+        /* Process: Layouting */
         {int i; union process *p = 0;
         while ((p = process_begin(ctx, PROCESS_LAYOUTING))) {
             switch (p->type) {default: break;
@@ -2820,6 +2950,7 @@ int main(void)
                 for (i = op->begin; i != op->end; i += op->inc) {
                     struct box *b = op->boxes[i];
                     switch (b->type) {
+                    case WIDGET_ICON: icon_blueprint(b); break;
                     case WIDGET_BUTTON: box_measure(b, 0); break;
                     case WIDGET_SLIDER: slider_blueprint(b); break;
                     default: blueprint(p, b); break;}
@@ -2830,6 +2961,7 @@ int main(void)
                 for (i = op->begin; i != op->end; i += op->inc) {
                     struct box *b = op->boxes[i];
                     switch (b->type) {
+                    case WIDGET_ICON: icon_layout(b); break;
                     case WIDGET_BUTTON: box_compute(b, 0); break;
                     case WIDGET_SLIDER: slider_layout(b); break;
                     default: layout(p, b); break;}
@@ -2873,6 +3005,7 @@ int main(void)
             for (i = 0; i < op->cnt; ++i) {
                 struct box *b = op->boxes[i];
                 switch (b->type) {
+                case WIDGET_ICON: nvgIcon(vg, b); break;
                 case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
                 case WIDGET_SLIDER: nvgSlider(vg, b); break;
                 default: break;}
