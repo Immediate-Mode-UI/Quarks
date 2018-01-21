@@ -1211,7 +1211,7 @@ widget_begin(struct state *s, int type)
 api unsigned
 widget_box_push(struct state *s, unsigned flags)
 {
-    union param p[2];
+    union param p[4];
     p[0].op = OP_BOX_PUSH;
     p[1].id = genid(s);
     p[2].id = s->wstk[s->wtop-1].id;
@@ -1395,6 +1395,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
         b->wid = e->wid;
         b->type = e->type;
         b->flags = e->flags;
+
         list_init(&b->node);
         list_init(&b->lnks);
         if (b != p) list_add_tail(&p->lnks, &b->node);
