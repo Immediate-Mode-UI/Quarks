@@ -6,7 +6,7 @@
 #include <assert.h> /* assert */
 #include <stdlib.h> /* malloc, free */
 #include <string.h> /* memcpy, memset */
-#include <stdint.h> /* uint64_t */
+#include <stdint.h> /* uint64_t, uintptr_t */
 #include <limits.h> /* INT_MAX */
 #include <stdio.h> /* fprintf, fputc */
 
@@ -404,6 +404,7 @@ struct process_paint {
 struct process_serialize {
     struct process_header hdr;
     enum serialization_type type;
+    const char *str;
     unsigned id;
     FILE *file;
 };
@@ -515,14 +516,14 @@ api void widget_box_pop(struct state *s);
 api unsigned widget_box(struct state *s, unsigned flags);
 api void widget_end(struct state *s);
 
-api void widget_push_param_float(struct state *s, float f);
-api void widget_push_param_int(struct state *s, int i);
-api void widget_push_param_uint(struct state *s, unsigned u);
-api void widget_push_param_id(struct state *s, unsigned id);
+api float *widget_push_param_float(struct state *s, float f);
+api int *widget_push_param_int(struct state *s, int i);
+api unsigned *widget_push_param_uint(struct state *s, unsigned u);
+api unsigned *widget_push_param_id(struct state *s, unsigned id);
 
-api void widget_push_modifier_float(struct state *s, float *f);
-api void widget_push_modifier_int(struct state *s, int *i);
-api void widget_push_modifier_uint(struct state *s, unsigned *u);
+api float* widget_push_modifier_float(struct state *s, float *f);
+api int* widget_push_modifier_int(struct state *s, int *i);
+api unsigned* widget_push_modifier_uint(struct state *s, unsigned *u);
 
 /* box */
 api void box_shrink(struct box *d, const struct box *s, int pad);
@@ -567,7 +568,7 @@ static const struct allocator default_allocator = {0,dalloc,dfree};
 #define list_foreach_rev_s(i,n,l) for ((i)=(l)->prev,(n)=(i)->prev;(i)!=(l);(i)=(n),(n)=(i)->prev)
 
 static const struct element g_root_elements[] = {
-    /* type             id, parent, wid,        flags,                     */
+    /* type             id, parent, wid,            flags */
     {WIDGET_ROOT,       0,  0,  WIDGET_ROOT,        BOX_INTERACTIVE|BOX_UNIFORM},
     {WIDGET_OVERLAY,    1,  0,  WIDGET_OVERLAY,     BOX_INTERACTIVE|BOX_UNIFORM},
     {WIDGET_POPUP,      2,  1,  WIDGET_POPUP,       BOX_INTERACTIVE|BOX_UNIFORM},
@@ -1054,12 +1055,12 @@ transform_rect(struct rect *d, const struct rect *s, const struct transform *t)
     d->w = ceili(cast(float,s->w) * t->sx);
     d->h = ceili(cast(float,s->h) * t->sy);
 }
-intern void
+intern union param*
 op_add(struct state *s, const union param *p, int cnt)
 {
     int i = 0;
     struct param_buffer *ob = s->opbuf;
-    assert((cnt + 1) < MAX_OPS);
+    assert(cnt < MAX_OPS-2);
     if ((s->op_idx + cnt) > (MAX_OPS-2)) {
         struct param_buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
@@ -1070,6 +1071,7 @@ op_add(struct state *s, const union param *p, int cnt)
     } assert(s->op_idx + cnt < (MAX_OPS-2));
     for (i = 0; i < cnt; ++i)
         ob->ops[s->op_idx++] = p[i];
+    return ob->ops - cnt;
 }
 api void
 pushid(struct state *s, unsigned id)
@@ -1241,45 +1243,51 @@ widget_box(struct state *s, unsigned flags)
     widget_box_pop(s);
     return id;
 }
-intern void
+intern union param*
 widget_push_param(struct state *s, union param *p, int cnt)
 {
     s->argcnt++;
-    op_add(s, p, cnt);
+    return op_add(s, p, cnt);
 }
-api void
+api float*
 widget_push_param_float(struct state *s, float f)
 {
-    union param p[2];
+    union param p[2], *q;
     p[0].op = OP_PUSH_FLOAT;
     p[1].f = f;
-    widget_push_param(s, p, cntof(p));
+    q = widget_push_param(s, p, cntof(p));
+    return &q[1].f;
 }
-api void
+api int*
 widget_push_param_int(struct state *s, int i)
 {
-    union param p[2];
+    union param p[2], *q;
     p[0].op = OP_PUSH_INT;
     p[1].i = i;
-    widget_push_param(s, p, cntof(p));
+    q = widget_push_param(s, p, cntof(p));
+    return &q[1].i;
 }
-api void
+api unsigned*
 widget_push_param_uint(struct state *s, unsigned u)
 {
-    union param p[2];
+    union param p[2], *q;
     p[0].op = OP_PUSH_UINT;
     p[1].u = u;
     widget_push_param(s, p, cntof(p));
+    q = widget_push_param(s, p, cntof(p));
+    return &q[1].u;
 }
-api void
+api unsigned*
 widget_push_param_id(struct state *s, unsigned id)
 {
-    union param p[2];
+    union param p[2], *q;
     p[0].op = OP_PUSH_ID;
     p[1].id = id;
     widget_push_param(s, p, cntof(p));
+    q = widget_push_param(s, p, cntof(p));
+    return &q[1].id;
 }
-api void
+api float*
 widget_push_modifier_float(struct state *s, float *f)
 {
     struct repository *repo = s->repo;
@@ -1289,9 +1297,9 @@ widget_push_modifier_float(struct state *s, float *f)
         struct widget w = s->wstk[s->wtop-1];
         if (act->wid == w.id)
             *f = act->params[w.argcnt].f;
-    } widget_push_param_float(s, *f);
+    } return widget_push_param_float(s, *f);
 }
-api void
+api int*
 widget_push_modifier_int(struct state *s, int *i)
 {
     struct repository *repo = s->repo;
@@ -1301,9 +1309,9 @@ widget_push_modifier_int(struct state *s, int *i)
         struct widget w = s->wstk[s->wtop-1];
         if (act->wid == w.id)
             *i = act->params[w.argcnt].i;
-    } widget_push_param_int(s, *i);
+    } return widget_push_param_int(s, *i);
 }
-api void
+api unsigned*
 widget_push_modifier_uint(struct state *s, unsigned *u)
 {
     struct repository *repo = s->repo;
@@ -1313,7 +1321,7 @@ widget_push_modifier_uint(struct state *s, unsigned *u)
         struct widget w = s->wstk[s->wtop-1];
         if (act->wid == w.id)
             *u = act->params[w.argcnt].u;
-    } widget_push_param_uint(s, *u);
+    } return widget_push_param_uint(s, *u);
 }
 api void
 widget_end(struct state *s)
@@ -1347,6 +1355,31 @@ bfs(struct box **buf, struct box *root)
         list_foreach(i, &b->lnks)
             que[++tail] = list_entry(i,struct box,node);
     } return que+1;
+}
+intern int
+box_intersect(const struct box *f, const struct box *s)
+{
+    const struct rect *a = &f->scr;
+    const struct rect *b = &s->scr;
+    return intersect(a->x, a->y, a->w, a->h, b->x, b->y, b->w, b->h);
+}
+intern int
+dfs(struct box **buf, struct box **stk, struct box *root)
+{
+    int tail = 0;
+    unsigned long head = 0;
+    struct list_hook *i = 0;
+
+    stk[head++] = root;
+    while (head > 0) {
+        struct box *b = stk[--head];
+        buf[tail++] = b;
+        list_foreach_rev(i, &b->lnks) {
+            struct box *s = list_entry(i,struct box,node);
+            if (s->hidden || !box_intersect(b, s)) continue;
+            stk[head++] = s;
+        }
+    } return tail;
 }
 api void
 call(struct context *ctx, unsigned id, const union param *op, int opcnt)
@@ -1421,6 +1454,28 @@ operation_end(union process *p)
     assert(p);
     if (!p) return;
     temp_memory_end(p->hdr.tmp);
+}
+api void
+box_measure(struct box *b, int pad)
+{
+    struct list_hook *i = 0;
+    list_foreach(i, &b->lnks) {
+        const struct box *n = list_entry(i, struct box, node);
+        b->dw = max(b->dw, n->dw + 2*pad);
+        b->dh = max(b->dh, n->dh + 2*pad);
+    }
+}
+api void
+box_compute(struct box *b, int pad)
+{
+    struct list_hook *i = 0;
+    list_foreach(i, &b->lnks) {
+        struct box *n = list_entry(i, struct box, node);
+        n->loc.x = b->loc.x + pad;
+        n->loc.y = b->loc.y + pad;
+        n->loc.w = max(b->loc.w - 2*pad, 0);
+        n->loc.h = max(b->loc.h - 2*pad, 0);
+    }
 }
 intern void
 reorder(struct box *b)
@@ -2064,11 +2119,35 @@ process_begin(struct context *ctx, unsigned flags)
         return p;
     }
     case STATE_PAINT: {
+        int depth = 0;
+        struct box **stk = 0;
+        struct list_hook *pi = 0;
+        union process *p = &ctx->proc;
+        operation_begin(p, PROC_PAINT, ctx, &ctx->arena);
+        p->paint.boxes = 0;
+        p->paint.cnt = 0;
+
+        /* caculate tree depth and number of boxes */
+        p->paint.cnt = depth = 0;
+        list_foreach(pi, &ctx->mod) {
+            struct module *m = list_entry(pi, struct module, hook);
+            struct repository *r = m->repo[m->repoid];
+            depth = max(depth, r->depth+1);
+            p->paint.cnt += r->boxcnt;
+        }
+        /* generate list of boxes in dfs order */
+        p->paint.boxes = arena_push_array(&ctx->arena, p->paint.cnt+1, struct box*);
+        tmp = temp_memory_begin(&ctx->arena);
+        stk = arena_push_array(&ctx->arena, depth + 1, struct box*);
+        p->paint.cnt = dfs(op->surfaces, stk, ctx->tree);
+        temp_memory_end(tmp);
+
         if (flags & flag(PROC_SERIALIZE))
             jmpto(ctx, STATE_SERIALIZE);
-        else if (flags & flag(PROCESS_CLEAR))
+        else if (flags & flag(PROC_CLEAR))
             jmpto(ctx, STATE_CLEAR);
         else jmpto(ctx, STATE_DONE);
+        return p;
     } break;
     case STATE_SERIALIZE: {
         union process *p = &ctx->proc;
@@ -2162,7 +2241,7 @@ process_begin(struct context *ctx, unsigned flags)
         r = m->repo[m->repoid];
         if (!r) jmpto(ctx, STATE_DONE);
 
-        fprintf(fp, "const struct element g_elements[] = {\n");
+        fprintf(fp, "const struct element g_%s_elements[] = {\n", p->serial.str);
         for (i = 0; i < r->boxcnt; ++i) {
             const struct box *b = r->boxes + i;
             const struct box *pb = b->parent;
@@ -2172,31 +2251,36 @@ process_begin(struct context *ctx, unsigned flags)
                 if (b->flags & flag(j)) {
                     const struct property_def *pi = 0;
                     pi = property_info + j;
+                    buf[n++] = '|';
                     copy(buf+n, pi->name, pi->len);
                     n += pi->len;
                 } buf[n] = 0;
             } fprintf(fp, "    {%d, %u, %u, %u, %s},\n", b->type,b->id,pid,b->wid,buf);
         } fprintf(fp, "};\n");
-        fprintf(fp, "const unsigned g_tbl_keys[%d] = {\n    ", r->tbl.cnt);
+        fprintf(fp, "const unsigned g_%s_tbl_keys[%d] = {\n    ",p->serial.str,r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
             if (i && !(i & 0x0F)) fprintf(fp, "\n    ");
             fprintf(fp, "%u", r->tbl.keys[i]);
             if (i < r->tbl.cnt-1) fputc(',', fp);
         } fprintf(fp, "\n};\n");
-        fprintf(fp, "const unsigned g_tbl_vals[%d] = {\n    ", r->tbl.cnt);
+        fprintf(fp, "const unsigned g_%s_tbl_vals[%d] = {\n    ",p->serial.str, r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
             if (i && !(i & 0x0F)) fprintf(fp, "\n    ");
             fprintf(fp, "%d", r->tbl.vals[i]);
             if (i < r->tbl.cnt-1) fputc(',', fp);
         } fprintf(fp, "\n};\n");
-        fprintf(fp, "struct box *g_bfs[%d];\n", r->boxcnt+1);
-        fprintf(fp, "struct box g_boxes[%d];\n", r->boxcnt);
-        fprintf(fp, "struct repository g_repository;\n");
-        fprintf(fp, "struct module g_module;\n");
-        fprintf(fp, "const struct component g_component = {\n");
-        fprintf(fp, "    %d, g_elements, cntof(g_elements),\n", VERSION);
-        fprintf(fp, "    g_tbl_vals, g_tbl_keys, cntof(g_tbl), %d \n", r->depth);
-        fprintf(fp, "    g_module, g_repo, g_boxes, g_bfs, cntof(g_boxes)\n");
+        fprintf(fp, "struct box *g_%s_bfs[%d];\n", p->serial.str, r->boxcnt+1);
+        fprintf(fp, "struct box g_%s_boxes[%d];\n", p->serial.str, r->boxcnt);
+        fprintf(fp, "struct repository g_%s_repository;\n", p->serial.str);
+        fprintf(fp, "struct module g_%s_module;\n", p->serial.str);
+        fprintf(fp, "const struct component g_%s_component = {\n", p->serial.str);
+        fprintf(fp, "    %d, g_%s_elements,", VERSION, p->serial.str);
+        fprintf(fp, "cntof(g_%s_elements),\n", p->serial.str);
+        fprintf(fp, "    g_%s_tbl_vals, g_%s_tbl_keys", p->serial.str, p->serial.str);
+        fprintf(fp, "cntof(g_%s_tbl), %d \n", p->serial.str, r->depth);
+        fprintf(fp, "    g_%s_module, g_%s_repo", p->serial.str, p->serial.str);
+        fprintf(fp, "g_%s_boxes, g_%s_bfs,", p->serial.str, p->serial.str);
+        fprintf(fp, "cntof(g_%s_boxes)\n", p->serial.str);
         fprintf(fp, "};\n");
 
         if (flags & flag(PROCESS_CLEAR))
@@ -2236,28 +2320,6 @@ api void
 process_end(union process *p)
 {
     operation_end(p);
-}
-api void
-box_measure(struct box *b, int pad)
-{
-    struct list_hook *i = 0;
-    list_foreach(i, &b->lnks) {
-        const struct box *n = list_entry(i, struct box, node);
-        b->dw = max(b->dw, n->dw + 2*pad);
-        b->dh = max(b->dh, n->dh + 2*pad);
-    }
-}
-api void
-box_compute(struct box *b, int pad)
-{
-    struct list_hook *i = 0;
-    list_foreach(i, &b->lnks) {
-        struct box *n = list_entry(i, struct box, node);
-        n->loc.x = b->loc.x + pad;
-        n->loc.y = b->loc.y + pad;
-        n->loc.w = max(b->loc.w - 2*pad, 0);
-        n->loc.h = max(b->loc.h - 2*pad, 0);
-    }
 }
 intern void
 layout_copy(struct box *b)
@@ -2395,14 +2457,14 @@ init(struct context *ctx, const struct allocator *a)
     /* setup root module */
     {struct component root;
     memcpy(&root, &g_root, sizeof(root));
-    root.boxes = ctx->boxes;
     root.boxcnt = cntof(g_root_elements);
+    root.boxes = ctx->boxes;
     root.module = &ctx->root;
     root.repo = &ctx->repo;
     root.bfs = ctx->bfs;
     load(ctx, 0, &root);}
 
-    /* setup fast access root boxes pointers */
+    /* setup direct root boxes pointers */
     ctx->tree = ctx->boxes + (WIDGET_ROOT - WIDGET_LAYER_BEGIN);
     ctx->overlay = ctx->boxes + (WIDGET_OVERLAY - WIDGET_LAYER_BEGIN);
     ctx->popup = ctx->boxes + (WIDGET_POPUP - WIDGET_LAYER_BEGIN);
@@ -2547,9 +2609,12 @@ input_rune(struct context *ctx, unsigned long r)
  *
  * =========================================================================== */
 enum widget_type {
+    /* Widgets */
     WIDGET_ICON,
     WIDGET_BUTTON,
     WIDGET_SLIDER,
+    /* Layouting */
+    WIDGET_SBOX,
     WIDGET_TYPE_COUNT
 };
 /* ---------------------------------------------------------------------------
@@ -2614,42 +2679,43 @@ button_end(struct state *s)
  *                                  SLIDER
  * --------------------------------------------------------------------------- */
 struct slider {
-    float min;
-    float *value;
-    float max;
+    unsigned id;
     unsigned cid;
+    float *min;
+    float *value;
+    float *max;
 };
-api unsigned
-slider(struct state *s, float min, float *value, float max)
-{
-    unsigned sid = 0, cid = 0;
-    widget_begin(s, WIDGET_BUTTON);
-        widget_push_param_float(s, min);
-        widget_push_modifier_float(s, value);
-        widget_push_param_float(s, max);
-        sid = widget_box_push(s, BOX_INTERACTIVE);
-            cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X);
-            widget_push_param_id(s, cid);
-        widget_box_pop(s);
-    widget_end(s);
-    return sid;
-}
 api struct slider
-slider_build(struct box *b)
+slider(struct box *b)
 {
     struct slider sld;
     union param *args = b->params;
-    sld.min = args[0].f;
+    sld.min = &args[0].f;
     sld.value = &args[1].f;
-    sld.max = args[2].f;
+    sld.max = &args[2].f;
     sld.cid = args[3].id;
+    return sld;
+}
+api struct slider
+sliderf(struct state *s, float min, float *value, float max)
+{
+    struct slider sld;
+    widget_begin(s, WIDGET_BUTTON);
+        sld.min = widget_push_param_float(s, min);
+        sld.value = widget_push_modifier_float(s, value);
+        sld.max = widget_push_param_float(s, max);
+        sld.id = widget_box_push(s, BOX_INTERACTIVE);
+            sld.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X);
+            widget_push_param_id(s, sld.cid);
+        widget_box_pop(s);
+    widget_end(s);
     return sld;
 }
 api void
 slider_blueprint(struct box *b)
 {
     static const cursor_size = 8;
-    struct slider sld = slider_build(b);
+    struct slider sld = slider(b);
     if (b->id == sld.cid) {
         box_measure(b, 0);
         b->dw = max(b->dw, cursor_size);
@@ -2659,13 +2725,13 @@ slider_blueprint(struct box *b)
 api void
 slider_layout(struct box *b)
 {
-    struct slider sld = slider_build(b);
+    struct slider sld = slider(b);
     if (b->id != sld.cid)
         {box_compute(b, 0); return;}
 
     {const struct box *p = b->parent;
-    float sld_min = min(sld.min, sld.max);
-    float sld_max = max(sld.min, sld.max);
+    float sld_min = min(*sld.min, *sld.max);
+    float sld_max = max(*sld.min, *sld.max);
     float sld_val = clamp(sld_min, *sld.value, sld_max);
     float cur_off = (sld_val - sld_min) / sld_max;
 
@@ -2682,13 +2748,13 @@ api void
 slider_input(struct box *b, const union event *evt)
 {
     struct box *p = b->parent;
-    struct slider sld = slider_build(b);
+    struct slider sld = slider(b);
     if (b->id != sld.cid) return;
     if (!b->moved || evt->type != EVT_MOVED)
         return;
 
-    {float sld_min = min(sld.min, sld.max);
-    float sld_max = max(sld.min, sld.max);
+    {float sld_min = min(*sld.min, *sld.max);
+    float sld_max  = max(*sld.min, *sld.max);
     b->loc.x = min(p->loc.x + p->loc.w - b->loc.w, b->loc.x);
     b->loc.x = max(p->loc.x, b->loc.x);
 
@@ -2697,6 +2763,115 @@ slider_input(struct box *b, const union event *evt)
     *sld.value = cast(float,(b->loc.x - x)) / cast(float,w);
     *sld.value = (*sld.value * sld_max) + sld_min;}}
 }
+/* ---------------------------------------------------------------------------
+ *                                  SBOX
+ * --------------------------------------------------------------------------- */
+enum sbox_vertical_alignment {
+    SBOX_VALIGN_TOP,
+    SBOX_VALIGN_CENTER,
+    SBOX_VALIGN_BOTTOM
+};
+enum sbox_horizontal_alignment {
+    SBOX_HALIGN_LEFT,
+    SBOX_HALIGN_CENTER,
+    SBOX_HALIGN_RIGHT
+};
+struct sbox {
+    unsigned id;
+    unsigned content;
+    int *valign;
+    int *halign;
+    int *pad;
+};
+api struct sbox
+sbox(struct box *b)
+{
+    struct sbox sbx;
+    union param *args = b->params;
+    sbx.valign = &args[0].i;
+    sbx.halign = &args[1].i;
+    sbx.pad = &args[2].i;
+    sbx.content = args[3].id;
+    sbx.id = b->id;
+    return sbx;
+}
+api void
+sbox_blueprint(struct box *b)
+{
+    struct sbox sbx = sbox(b);
+    if (b->id != sbx.content)
+        box_measure(b, *sbx.pad);
+    else box_measure(b, 0);
+}
+api void
+sbox_layout(struct box *b)
+{
+    struct list_hook *h = 0;
+    struct sbox sbx = sbox(b);
+    if (b->id != sbx.content) return;
+    box_shrink(b, b->parent, *sbx.pad);
+
+    switch (*sbx.halign) {
+    case SBOX_HALIGN_LEFT:
+        list_foreach(h, &b->lnks) {
+            struct box *n = list_entry(h, struct box, node);
+            n->loc.x = b->loc.x;
+            n->loc.w = b->loc.w;
+        } break;
+    case SBOX_HALIGN_CENTER:
+        list_foreach(h, &b->lnks) {
+            struct box *n = list_entry(h, struct box, node);
+            n->loc.x = max(b->loc.x,(b->loc.x + b->loc.w/2) - n->dw/2);
+            n->loc.w = max((b->loc.x + b->loc.w) - n->loc.x, 0);
+        } break;
+    case SBOX_HALIGN_RIGHT:
+        list_foreach(h, &b->lnks) {
+            struct box *n = list_entry(h, struct box, node);
+            n->loc.x = max(b->loc.x, b->loc.x + b->loc.w - n->dw);
+            n->loc.w = min(n->dw, n->loc.w);
+        } break;}
+
+    switch (*sbx.valign) {
+    case SBOX_VALIGN_TOP:
+        list_foreach(h, &b->lnks) {
+            struct box *n = list_entry(h, struct box, node);
+            n->loc.y = b->loc.y;
+            n->loc.h = b->loc.h;
+        } break;
+    case SBOX_VALIGN_CENTER:
+        list_foreach(h, &b->lnks) {
+            struct box *n = list_entry(h, struct box, node);
+            n->loc.y = max(b->loc.y,(b->loc.y + b->loc.h/2) - n->dh/2);
+            n->loc.h = max((b->loc.y + b->loc.h) - n->loc.y, 0);
+        } break;
+    case SBOX_VALIGN_BOTTOM:
+        list_foreach(h, &b->lnks) {
+            struct box *n = list_entry(h, struct box, node);
+            n->loc.y = max(b->loc.y,b->loc.y + b->loc.h - n->dh);
+            n->loc.h = min(n->dh, n->loc.h);
+        } break;}
+}
+api struct sbox
+sbox_begin(struct state *s)
+{
+    struct sbox sbx;
+    widget_begin(s, WIDGET_SBOX);
+    sbx.valign = widget_push_param_int(s, SBOX_VALIGN_TOP);
+    sbx.halign = widget_push_param_int(s, SBOX_HALIGN_LEFT);
+    sbx.pad = widget_push_param_int(s, 4);
+    sbx.id = widget_box_push(s, BOX_INTERACTIVE);
+    sbx.content = widget_box_push(s, BOX_INTERACTIVE);
+    widget_push_param_id(s, sbx.content);
+    return sbx;
+}
+api void
+sbox_end(struct state *s)
+{
+    widget_box_pop(s);
+    widget_box_pop(s);
+    widget_end(s);
+}
+
 /* ===========================================================================
  *
  *                                  APP
@@ -2761,7 +2936,7 @@ api void
 nvgSlider(struct NVGcontext *vg, struct box *b)
 {
     NVGpaint bg, knob;
-    struct slider sld = slider_build(b);
+    struct slider sld = slider(b);
     if (sld.cid == b->id) return;
 
     {struct box *p = b->parent;
@@ -2921,9 +3096,13 @@ int main(void)
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
-            button_begin(s);
-            icon(s, ICON_CIRCLE_OUTLINE);
-            button_end(s);
+            button_begin(s); {
+                struct sbox sbx = sbox_begin(s);
+                *sbx.halign = SBOX_HALIGN_CENTER;
+                *sbx.valign = SBOX_VALIGN_CENTER;
+                    icon(s, ICON_CIRCLE_OUTLINE);
+                sbox_end(s);
+            } button_end(s);
         } end(s);}
 
         /* Process: Commit */
@@ -2940,7 +3119,7 @@ int main(void)
         /* Process: Layouting */
         {int i; union process *p = 0;
         while ((p = process_begin(ctx, PROCESS_LAYOUTING))) {
-            switch (p->type) {default: break;
+            switch (p->type) {default:break;
             case PROC_BLUEPRINT: {
                 struct process_layouting *op = &p->layout;
                 for (i = op->begin; i != op->end; i += op->inc) {
@@ -3024,8 +3203,9 @@ int main(void)
         struct process_serialize *serial = &p->serial;
         if (p->type != PROC_FILL_SERIAL_CONFIG) break;
         serial->type = SERIALIZE_TABLES;
-        serial->id = id("ui");
         serial->file = stdout;
+        serial->id = id("ui");
+        serial->str = "ui";
         process_end(p);
     }}
     /* Process: Cleanup */
