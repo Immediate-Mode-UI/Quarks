@@ -197,7 +197,7 @@ struct box {
     unsigned scrolled:1;
 
     /* node */
-    int depth, cnt;
+    int depth;
     struct list_hook node;
     struct list_hook lnks;
     struct box *parent;
@@ -1833,7 +1833,6 @@ process_begin(struct context *ctx, unsigned flags)
                 transform_init(&b->tscr);
 
                 b->id = id;
-                b->cnt = 0;
                 b->type = g->type;
                 b->parent = pb;
                 b->depth = depth;
@@ -1845,7 +1844,6 @@ process_begin(struct context *ctx, unsigned flags)
                 list_init(&b->node);
                 list_init(&b->lnks);
                 list_add_tail(&pb->lnks, &b->node);
-                pb->cnt++;
 
                 assert(depth < MAX_TREE_DEPTH);
                 boxstk[depth++] = b;}
