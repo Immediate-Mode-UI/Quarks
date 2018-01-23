@@ -10,6 +10,15 @@
 #include <limits.h> /* INT_MAX */
 #include <stdio.h> /* fprintf, fputc */
 
+/* TODO: Library
+ * - Remove resizing and directly set tree root box size, so input won't cause
+ *   another layouting iteration.
+ * - Solve storing persistent state
+ * - Solve string parameter
+ * - Make reordering persistent over frames (zorder flag in box?)
+ * - Implement overlay box property for clipping regions
+ * - Add serialization into memory functions
+ */
 #undef min
 #undef max
 #define api static
@@ -1078,6 +1087,9 @@ api void
 pushid(struct state *s, unsigned id)
 {
     struct idrange *idr = 0;
+    assert(s);
+    if (!s) return;
+
     idr = &s->idstk[s->stkcnt++];
     idr->base = id;
     idr->cnt = 0;
@@ -1086,9 +1098,13 @@ pushid(struct state *s, unsigned id)
 api unsigned
 genid(struct state *s)
 {
+    int idx = 0;
     unsigned id = 0;
-    int idx = max(0, s->stkcnt-1);
     struct idrange *idr = 0;
+    assert(s);
+    if (!s) return 0;
+
+    idx = max(0, s->stkcnt-1);
     idr = &s->idstk[idx];
     id |= (idr->base & 0xFFFF) << 16;
     id |= (++idr->cnt);
@@ -1098,7 +1114,9 @@ genid(struct state *s)
 api void
 popid(struct state *s)
 {
-    if (!s->stkcnt) return;
+    assert(s);
+    assert(s->stkcnt);
+    if (!s || !s->stkcnt) return;
     s->stkcnt--;
 }
 intern struct state*
@@ -1128,7 +1146,12 @@ module_find(struct context *ctx, unsigned id)
 api struct state*
 module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
 {
-    struct state *s = state_find(ctx, id);
+    struct state *s = 0;
+    assert(ctx);
+    if (!ctx) return 0;
+
+    /* pick up previous state if possible */
+    s = state_find(ctx, id);
     if (s) {s->op_idx -= 2; return s;}
     s = arena_push_type(&ctx->arena, struct state);
 
@@ -1156,53 +1179,70 @@ module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
 api void
 module_end(struct state *s)
 {
-    union param p[2];
+    assert(s);
+    if (!s) return;
+    {union param p[2];
     p[0].op = OP_BUF_END;
     p[1].id = s->id;
-    op_add(s, p, cntof(p));
+    op_add(s, p, cntof(p));}
     popid(s);
 }
 api struct state*
 begin(struct context *ctx, unsigned id)
 {
+    assert(ctx);
+    if (!ctx) return 0;
     return module_begin(ctx, id, 0, WIDGET_UI-WIDGET_LAYER_BEGIN);
 }
 api void
 end(struct state *s)
 {
+    assert(s);
+    if (!s) return;
     module_end(s);
 }
 api void
 section_begin(struct state *s, unsigned id)
 {
-    union param p[5];
+    assert(s);
+    assert(id && "Section are not allowed to overwrite root");
+    if (!s || !id) return;
+
+    {union param p[5];
     p[0].op = OP_BUF_BEGIN;
     p[1].id = id;
     p[2].op = OP_BUF_ULINK;
     p[3].id = s->id;
     p[4].id = s->lastid;
-    op_add(s, p, cntof(p));
+    op_add(s, p, cntof(p));}
 }
 api void
 section_end(struct state *s)
 {
-    union param p[2];
+    assert(s);
+    if (!s) return;
+    {union param p[2];
     p[0].op = OP_BUF_END;
     p[1].id = s->id;
-    op_add(s, p, cntof(p));
+    op_add(s, p, cntof(p));}
 }
 api void
 link(struct state *s, unsigned id)
 {
-    union param p[2];
+    assert(s);
+    if (!s) return;
+    {union param p[2];
     p[0].op = OP_BUF_DLINK;
     p[1].id = id;
-    op_add(s, p, cntof(p));
+    op_add(s, p, cntof(p));}
 }
 api void
 widget_begin(struct state *s, int type)
 {
-    union param p[3], *q;
+    assert(s);
+    if (!s) return;
+
+    {union param p[3], *q;
     p[0].op = OP_WIDGET_BEGIN;
     p[1].type = type;
     p[2].i = 0;
@@ -1211,12 +1251,15 @@ widget_begin(struct state *s, int type)
     assert(s->wtop < cntof(s->wstk));
     s->wstk[s->wtop].id = genid(s);
     s->wstk[s->wtop].argc = &q[2].i;
-    s->wtop++;
+    s->wtop++;}
 }
 api unsigned
 widget_box_push(struct state *s, unsigned flags)
 {
-    union param p[4];
+    assert(s);
+    if (!s) return 0;
+
+    {union param p[4];
     p[0].op = OP_BOX_PUSH;
     p[1].id = genid(s);
     p[2].id = s->wstk[s->wtop-1].id;
@@ -1226,24 +1269,28 @@ widget_box_push(struct state *s, unsigned flags)
     s->depth++;
     s->tree_depth = max(s->depth, s->tree_depth);
     s->boxcnt++;
-    return p[1].id;
+    return p[1].id;}
 }
 api void
 widget_box_pop(struct state *s)
 {
-    union param p[1];
+    assert(s);
+    if (!s) return;
+    {union param p[1];
     p[0].op = OP_BOX_POP;
     op_add(s, p, cntof(p));
     assert(s->depth);
-    s->depth = max(s->depth-1, 0);
+    s->depth = max(s->depth-1, 0);}
 }
 api unsigned
 widget_box(struct state *s, unsigned flags)
 {
-    unsigned id = 0;
+    assert(s);
+    if (!s) return 0;
+    {unsigned id = 0;
     id = widget_box_push(s, flags);
     widget_box_pop(s);
-    return id;
+    return id;}
 }
 intern union param*
 widget_push_param(struct state *s, union param *p)
@@ -1256,97 +1303,131 @@ widget_push_param(struct state *s, union param *p)
 api float*
 widget_push_param_float(struct state *s, float f)
 {
-    union param p[2], *q;
+    assert(s);
+    if (!s) return 0;
+    {union param p[2], *q;
     p[0].op = OP_PUSH_FLOAT;
     p[1].f = f;
     q = widget_push_param(s, p);
-    return &q[1].f;
+    return &q[1].f;}
 }
 api int*
 widget_push_param_int(struct state *s, int i)
 {
-    union param p[2], *q;
+    assert(s);
+    if (!s) return 0;
+    {union param p[2], *q;
     p[0].op = OP_PUSH_INT;
     p[1].i = i;
     q = widget_push_param(s, p);
-    return &q[1].i;
+    return &q[1].i;}
 }
 api unsigned*
 widget_push_param_uint(struct state *s, unsigned u)
 {
-    union param p[2], *q;
+    assert(s);
+    if (!s) return 0;
+    {union param p[2], *q;
     p[0].op = OP_PUSH_UINT;
     p[1].u = u;
     widget_push_param(s, p);
     q = widget_push_param(s, p);
-    return &q[1].u;
+    return &q[1].u;}
 }
 api unsigned*
 widget_push_param_id(struct state *s, unsigned id)
 {
-    union param p[2], *q;
+    assert(s);
+    if (!s) return 0;
+    {union param p[2], *q;
     p[0].op = OP_PUSH_ID;
     p[1].id = id;
     widget_push_param(s, p);
     q = widget_push_param(s, p);
-    return &q[1].id;
+    return &q[1].id;}
 }
 api float*
 widget_push_modifier_float(struct state *s, float *f)
 {
-    struct repository *repo = s->repo;
+    assert(s);
+    assert(f);
+    assert(s->ctx);
+    if (!s || !f) return 0;
+
+    {struct repository *repo = s->repo;
     if (repo) {
         const struct context *ctx = s->ctx;
         const struct box *act = ctx->active;
         struct widget w = s->wstk[s->wtop-1];
         if (act->wid == w.id)
             *f = act->params[*w.argc].f;
-    } return widget_push_param_float(s, *f);
+    } return widget_push_param_float(s, *f);}
 }
 api int*
 widget_push_modifier_int(struct state *s, int *i)
 {
-    struct repository *repo = s->repo;
+    assert(s);
+    assert(i);
+    assert(s->ctx);
+    if (!s || !i) return 0;
+
+    {struct repository *repo = s->repo;
     if (repo) {
         const struct context *ctx = s->ctx;
         const struct box *act = ctx->active;
         struct widget w = s->wstk[s->wtop-1];
         if (act->wid == w.id)
             *i = act->params[*w.argc].i;
-    } return widget_push_param_int(s, *i);
+    } return widget_push_param_int(s, *i);}
 }
 api unsigned*
 widget_push_modifier_uint(struct state *s, unsigned *u)
 {
-    struct repository *repo = s->repo;
+    assert(s);
+    assert(u);
+    assert(s->ctx);
+    if (!s || !u) return 0;
+
+    {struct repository *repo = s->repo;
     if (repo) {
         const struct context *ctx = s->ctx;
         const struct box *act = ctx->active;
         struct widget w = s->wstk[s->wtop-1];
         if (act->wid == w.id)
             *u = act->params[*w.argc].u;
-    } return widget_push_param_uint(s, *u);
+    } return widget_push_param_uint(s, *u);}
 }
 api void
 widget_end(struct state *s)
 {
-    union param p[1];
+    assert(s);
+    if (!s) return;
+    {union param p[1];
     p[0].op = OP_WIDGET_END;
-    op_add(s, p, cntof(p));
+    op_add(s, p, cntof(p));}
     s->wtop = max(s->wtop-1, 0);
 }
 api void
 slot(struct state *s, unsigned id)
 {
-    union param p[5];
+    assert(s);
+    if (!s) return;
+    {union param p[5];
     widget_begin(s, WIDGET_SLOT);
     p[0].op = OP_BOX_PUSH;
     p[1].id = id;
     p[2].id = s->wstk[s->wtop-1].id;
     p[3].flags = id;
     p[4].op = OP_BOX_POP;
-    op_add(s, p, cntof(p));
+    op_add(s, p, cntof(p));}
     widget_end(s);
+}
+intern int
+box_intersect(const struct box *f, const struct box *s)
+{
+    const struct rect *a = &f->scr;
+    const struct rect *b = &s->scr;
+    return intersect(a->x, a->y, a->w, a->h, b->x, b->y, b->w, b->h);
 }
 intern struct box**
 bfs(struct box **buf, struct box *root)
@@ -1359,13 +1440,6 @@ bfs(struct box **buf, struct box *root)
         list_foreach(i, &b->lnks)
             que[++tail] = list_entry(i,struct box,node);
     } return que+1;
-}
-intern int
-box_intersect(const struct box *f, const struct box *s)
-{
-    const struct rect *a = &f->scr;
-    const struct rect *b = &s->scr;
-    return intersect(a->x, a->y, a->w, a->h, b->x, b->y, b->w, b->h);
 }
 intern int
 dfs(struct box **buf, struct box **stk, struct box *root)
@@ -1392,9 +1466,13 @@ call(struct context *ctx, unsigned id, const union param *op, int opcnt)
     #define OP(a,b,c) b,
         OPCODES(OP) 0
     #undef OP
-    }; struct state *s = begin(ctx, id);
-    s->op_idx = 0;
+    }; struct state *s = 0;
+    assert(ctx);
+    assert(op);
+    if (!ctx || !op) return;
 
+    s = begin(ctx, id);
+    s->op_idx = 0;
     {int i = 0;
     for (i = 0; i < opcnt; ++i) {
         const int cnt = op_cnt[op[i].op];
@@ -1405,11 +1483,22 @@ call(struct context *ctx, unsigned id, const union param *op, int opcnt)
 api void
 load(struct context *ctx, unsigned id, const struct component *c)
 {
+    struct repository *repo = 0;
+    struct module *m = 0;
     int i = 0;
-    struct repository *repo = c->repo;
-    struct module *m = c->module;
-    assert(VERSION == c->version);
 
+    assert(c);
+    assert(ctx);
+    assert(c->bfs);
+    assert(c->boxes);
+    assert(c->tbl_keys);
+    assert(c->tbl_vals);
+    assert(VERSION == c->version);
+    if (!c || VERSION != c->version || !ctx) return;
+    if (!c->bfs || !c->boxes || !c->tbl_keys || !c->tbl_vals)
+        return;
+
+    m = c->module;
     zero(m, szof(*m));
     m->id = id;
     m->root = c->boxes;
@@ -1417,6 +1506,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
     list_init(&m->hook);
     list_add_tail(&ctx->mod, &m->hook);
 
+    repo = c->repo;
     zero(repo, szof(*repo));
     repo->depth = c->depth;
     repo->boxes = c->boxes;
@@ -1448,6 +1538,9 @@ intern void
 operation_begin(union process *p, enum process_type type,
     struct context *ctx, struct memory_arena *arena)
 {
+    assert(p);
+    assert(ctx);
+    assert(arena);
     memset(p, 0, sizeof(*p));
     p->type = type;
     list_init(&p->input.evts);
@@ -1465,24 +1558,28 @@ operation_end(union process *p)
 api void
 box_blueprint(struct box *b, int pad)
 {
-    struct list_hook *i = 0;
+    assert(b);
+    if (!b) return;
+    {struct list_hook *i = 0;
     list_foreach(i, &b->lnks) {
         const struct box *n = list_entry(i, struct box, node);
         b->dw = max(b->dw, n->dw + 2*pad);
         b->dh = max(b->dh, n->dh + 2*pad);
-    }
+    }}
 }
 api void
 box_layout(struct box *b, int pad)
 {
-    struct list_hook *i = 0;
+    assert(b);
+    if (!b) return;
+    {struct list_hook *i = 0;
     list_foreach(i, &b->lnks) {
         struct box *n = list_entry(i, struct box, node);
         n->loc.x = b->loc.x + pad;
         n->loc.y = b->loc.y + pad;
         n->loc.w = max(b->loc.w - 2*pad, 0);
         n->loc.h = max(b->loc.h - 2*pad, 0);
-    }
+    }}
 }
 intern void
 reorder(struct box *b)
@@ -1602,6 +1699,8 @@ process_begin(struct context *ctx, unsigned flags)
         {OPCNT,0,0}
     };
     int i = 0;
+    assert(ctx);
+    if (!ctx) return 0;
     r:switch (ctx->state) {
     case STATE_DISPATCH: {
         if (flags & flag(PROC_CLEANUP))
@@ -1637,7 +1736,7 @@ process_begin(struct context *ctx, unsigned flags)
         }
         s = list_entry(ctx->iter, struct state, hook);
         s->mod = module_find(ctx, s->id);
-        if (s->mod) jmpto(ctx, STATE_ALLOC_TEMPORARY);
+        if (s->mod) jmpto(ctx, STATE_CALC_REQ_MEMORY);
 
         operation_begin(p, PROC_ALLOC, ctx, &ctx->arena);
         p->mem.size = szof(struct module);
@@ -1708,6 +1807,7 @@ process_begin(struct context *ctx, unsigned flags)
         repo->depth = s->tree_depth + 1;
         repo->boxcnt = 1;
 
+        /* setup module root box */
         m->root = repo->boxes;
         list_init(&m->root->node);
         list_init(&m->root->lnks);
@@ -1725,7 +1825,7 @@ process_begin(struct context *ctx, unsigned flags)
         boxstk[0] = repo->boxes;
         while (1) {
             switch (op[0].op) {
-            /* ----------------------- Buffer ---------------------- */
+            /* ---------------------------- Buffer -------------------------- */
             case OP_BUF_END:
                 goto eol0;
             case OP_NEXT_BUF:
@@ -1782,7 +1882,7 @@ process_begin(struct context *ctx, unsigned flags)
                 b->parent = pb;}
             } break;
 
-            /* ----------------------- Widgets ---------------------- */
+            /* --------------------------- Widgets -------------------------- */
             case OP_WIDGET_BEGIN: {
                 struct gizmo *g = &gstk[gtop++];
                 assert(gtop < MAX_TREE_DEPTH);
@@ -1794,7 +1894,7 @@ process_begin(struct context *ctx, unsigned flags)
             case OP_WIDGET_END:
                 assert(gtop > 0); gtop--; break;
 
-            /* ----------------------- Parameter ---------------------- */
+            /* -------------------------- Parameter ------------------------- */
             case OP_PUSH_FLOAT:
             case OP_PUSH_INT:
             case OP_PUSH_UINT:
@@ -1802,19 +1902,21 @@ process_begin(struct context *ctx, unsigned flags)
                 struct gizmo *g = &gstk[max(0,gtop-1)];
                 assert(gtop > 0);
                 assert(g->argi < g->argc);
+
+                {int idx = g->params + g->argi++;
                 switch (op[0].op) {
                     case OP_PUSH_FLOAT:
-                        repo->params[g->argi++].f = op[1].f; break;
+                        repo->params[idx].f = op[1].f; break;
                     case OP_PUSH_INT:
-                        repo->params[g->argi++].i = op[1].i; break;
+                        repo->params[idx].i = op[1].i; break;
                     case OP_PUSH_UINT:
-                        repo->params[g->argi++].u = op[1].u; break;
+                        repo->params[idx].u = op[1].u; break;
                     case OP_PUSH_ID:
-                        repo->params[g->argi++].id = op[1].id; break;
-                }
+                        repo->params[idx].id = op[1].id; break;
+                }}
             } break;
 
-            /* ----------------------- Boxes ---------------------- */
+            /* ---------------------------- Boxes ----------------------------*/
             case OP_BOX_POP:
                 assert(depth > 1); depth--; break;
             case OP_BOX_PUSH: {
@@ -1852,6 +1954,7 @@ process_begin(struct context *ctx, unsigned flags)
         } eol0:;}
         repo->bfs = bfs(repo->bfs, repo->boxes);
         ctx->unbalanced = 1;
+        if (old) list_del(&old->boxes[0].node);
 
         /* III.) Free old repository */
         operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
@@ -2280,7 +2383,7 @@ process_begin(struct context *ctx, unsigned flags)
         r = m->repo[m->repoid];
         if (!r) jmpto(ctx, STATE_DONE);
 
-        /* dump repository into C compile tile tables */
+        /* dump repository into C compile time tables */
         fprintf(fp, "const struct element g_%s_elements[] = {\n", p->serial.str);
         for (i = 0; i < r->boxcnt; ++i) {
             const struct box *b = r->boxes + i;
@@ -3223,6 +3326,9 @@ clip_region_end(struct state *s)
 #include <GL/glu.h>
 #include "SDL2/SDL.h"
 
+/* ---------------------------------------------------------------------------
+ *                                  CANVAS
+ * --------------------------------------------------------------------------- */
 /* NanoVG */
 #define NANOVG_GL2_IMPLEMENTATION
 #include "nanovg/src/fontstash.h"
@@ -3323,8 +3429,7 @@ nvgIcon(struct NVGcontext *vg, struct box *b)
         nvgBeginPath(vg);
         nvgCircle(vg, cx,cy, kr);
         nvgFillColor(vg, nvgRGBA(200,200,200,255));
-        if (sym == ICON_CIRCLE_SOLID)
-            nvgFill(vg);
+        if (sym == ICON_CIRCLE_SOLID) nvgFill(vg);
         else nvgStroke(vg);
     } break;
     case ICON_RECT_SOLID:
@@ -3332,8 +3437,7 @@ nvgIcon(struct NVGcontext *vg, struct box *b)
         nvgBeginPath(vg);
         nvgRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h);
         nvgFillColor(vg, nvgRGBA(200,200,200,255));
-        if (sym == ICON_RECT_SOLID)
-            nvgFill(vg);
+        if (sym == ICON_RECT_SOLID) nvgFill(vg);
         else nvgStroke(vg);
     } break;
     case ICON_TRIANGLE_UP: {
@@ -3399,6 +3503,161 @@ nvgClipRegion(struct NVGcontext *vg, struct box *b, struct rect *sis)
         *sis = b->scr;
     }
 }
+/* ---------------------------------------------------------------------------
+ *                                  PLATFORM
+ * --------------------------------------------------------------------------- */
+static void
+ui_update(struct context *ctx)
+{
+    /* Process: Commit */
+    {union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_COMMIT))) {
+        switch (p->type) {default: break;
+        case PROC_ALLOC_FRAME:
+        case PROC_ALLOC: p->mem.ptr = calloc(p->mem.size,1); break;
+        case PROC_FREE_FRAME:
+        case PROC_FREE: free(p->mem.ptr); break;}
+        process_end(p);
+    }}
+    /* Process: Layouting */
+    {int i; union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_LAYOUTING))) {
+        switch (p->type) {default:break;
+        case PROC_BLUEPRINT: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc) {
+                struct box *b = op->boxes[i];
+                switch (b->type) {
+                case WIDGET_ICON: icon_blueprint(b); break;
+                case WIDGET_BUTTON: box_blueprint(b, 0); break;
+                case WIDGET_SLIDER: slider_blueprint(b); break;
+                case WIDGET_SBOX: sbox_blueprint(b); break;
+                default: blueprint(p, b); break;}
+            }
+        } break;
+        case PROC_LAYOUT: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc) {
+                struct box *b = op->boxes[i];
+                switch (b->type) {
+                case WIDGET_ICON: icon_layout(b); break;
+                case WIDGET_BUTTON: box_layout(b, 0); break;
+                case WIDGET_SLIDER: slider_layout(b); break;
+                case WIDGET_SBOX: sbox_layout(b); break;
+                default: layout(p, b); break;}
+            }
+        } break;
+       case PROC_TRANSFORM: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc) {
+                struct box *b = op->boxes[i];
+                switch (b->type) {
+                default: transform(p, b); break;}
+            }
+        } break;}
+        process_end(p);
+    }}
+    /* Process: Input */
+    {int i; union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_INPUT))) {
+        struct list_hook *it = 0;
+        struct process_input *op = &p->input;
+        list_foreach(it, &op->evts) {
+            union event *evt = list_entry(it, union event, hdr.hook);
+            for (i = 0; i < evt->hdr.cnt; i++) {
+                struct box *b = evt->hdr.boxes[i];
+                switch (b->type) {
+                case WIDGET_SLIDER: slider_input(b, evt); break;
+                default: input(p, evt, b); break;}
+            }
+        } process_end(p);
+    }}
+}
+static void
+ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
+{
+    int i = 0; union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_PAINT))) {
+        struct process_paint *op = &p->paint;
+        struct rect scissor = {0,0,0,0};
+        scissor.w = w, scissor.h = h;
+
+        for (i = 0; i < op->cnt; ++i) {
+            struct box *b = op->boxes[i];
+            switch (b->type) {
+            case WIDGET_ICON: nvgIcon(vg, b); break;
+            case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
+            case WIDGET_SLIDER: nvgSlider(vg, b); break;
+            case WIDGET_CLIP_REGION: nvgClipRegion(vg, b, &scissor);
+            default: break;}
+        } nvgResetScissor(vg);
+        process_end(p);
+    }
+}
+static void
+ui_clear(struct context *ctx)
+{
+    union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_CLEAR))) {
+        free(p->mem.ptr);
+        process_end(p);
+    }
+}
+static void
+ui_cleanup(struct context *ctx)
+{
+    union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_CLEANUP))) {
+        free(p->mem.ptr);
+        process_end(p);
+    } destroy(ctx);
+}
+static void
+ui_serialize_table(struct context *ctx, FILE *fp, unsigned id, const char *str)
+{
+    union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_SERIALIZE))) {
+        struct process_serialize *serial = &p->serial;
+        serial->type = SERIALIZE_TABLES;
+        serial->file = stdout;
+        serial->str = str;
+        serial->id = id;
+        process_end(p);
+    }
+}
+static void
+ui_event(struct context *ctx, const SDL_Event *evt)
+{
+    switch (evt->type) {
+    case SDL_MOUSEMOTION: input_motion(ctx, evt->motion.x, evt->motion.y); break;
+    case SDL_MOUSEWHEEL: input_scroll(ctx, evt->wheel.x, evt->wheel.y); break;
+    case SDL_TEXTINPUT: input_text(ctx, txt(evt->text.text)); break;
+    case SDL_WINDOWEVENT: {
+         if (evt->window.event == SDL_WINDOWEVENT_RESIZED ||
+            evt->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            input_resize(ctx, evt->window.data1, evt->window.data2);
+    } break;
+    case SDL_MOUSEBUTTONUP:
+    case SDL_MOUSEBUTTONDOWN: {
+        int down = (evt->type == SDL_MOUSEBUTTONDOWN);
+        if (evt->button.button == SDL_BUTTON_LEFT)
+            input_button(ctx, MOUSE_BUTTON_LEFT, down);
+        else if (evt->button.button == SDL_BUTTON_RIGHT)
+            input_button(ctx, MOUSE_BUTTON_RIGHT, down);
+    } break;
+    case SDL_KEYUP:
+    case SDL_KEYDOWN: {
+        int down = (evt->type == SDL_KEYDOWN);
+        SDL_Keycode sym = evt->key.keysym.sym;
+        input_key(ctx, sym, down);
+    } break;}
+}
+
+/* ===========================================================================
+ *
+ *                                  Main
+ *
+ * =========================================================================== */
 int main(void)
 {
     int quit = 0;
@@ -3416,165 +3675,44 @@ int main(void)
     glContext = SDL_GL_CreateContext(win);
 
     ctx = create(DEFAULT_ALLOCATOR);
-    vg = nvgCreateGL2(0);
+    vg = nvgCreateGL2(NVG_ANTIALIAS);
     if (!vg) return -1;
 
     input_resize(ctx, 1000, 600);
     while (!quit) {
-        /* System: Input */
-        {SDL_Event evt;
+        SDL_Event evt;
         while (SDL_PollEvent(&evt)) {
             switch (evt.type) {
-            case SDL_QUIT: quit = 1; break;
-            case SDL_MOUSEMOTION: input_motion(ctx, evt.motion.x, evt.motion.y); break;
-            case SDL_MOUSEWHEEL: input_scroll(ctx, evt.wheel.x, evt.wheel.y); break;
-            case SDL_TEXTINPUT: input_text(ctx, txt(evt.text.text)); break;
-            case SDL_WINDOWEVENT: {
-                 if (evt.window.event == SDL_WINDOWEVENT_RESIZED ||
-                    evt.window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-                    input_resize(ctx, evt.window.data1, evt.window.data2);
-            } break;
-            case SDL_MOUSEBUTTONUP:
-            case SDL_MOUSEBUTTONDOWN: {
-                int down = (evt.type == SDL_MOUSEBUTTONDOWN);
-                if (evt.button.button == SDL_BUTTON_LEFT)
-                    input_button(ctx, MOUSE_BUTTON_LEFT, down);
-                else if (evt.button.button == SDL_BUTTON_RIGHT)
-                    input_button(ctx, MOUSE_BUTTON_RIGHT, down);
-            } break;
-            case SDL_KEYUP:
-            case SDL_KEYDOWN: {
-                int down = (evt.type == SDL_KEYDOWN);
-                SDL_Keycode sym = evt.key.keysym.sym;
-                input_key(ctx, sym, down);
-            } break;}
-        }}
-
+            case SDL_QUIT: quit = 1; break;}
+            ui_event(ctx, &evt);
+        }
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
             button_begin(s); {
                 struct sbox sbx = sbox_begin(s);
+                *sbx.pad = 8;
                 *sbx.halign = SBOX_HALIGN_CENTER;
                 *sbx.valign = SBOX_VALIGN_CENTER;
-                    icon(s, ICON_CIRCLE_OUTLINE);
+                    icon(s, ICON_TRIANGLE_DOWN);
                 sbox_end(s);
             } button_end(s);
         } end(s);}
 
-        /* Process: Commit */
-        {union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_COMMIT))) {
-            switch (p->type) {default: break;
-            case PROC_ALLOC_FRAME:
-            case PROC_ALLOC: p->mem.ptr = calloc(p->mem.size,1); break;
-            case PROC_FREE_FRAME:
-            case PROC_FREE: free(p->mem.ptr); break;}
-            process_end(p);
-        }}
-
-        /* Process: Layouting */
-        {int i; union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_LAYOUTING))) {
-            switch (p->type) {default:break;
-            case PROC_BLUEPRINT: {
-                struct process_layouting *op = &p->layout;
-                for (i = op->begin; i != op->end; i += op->inc) {
-                    struct box *b = op->boxes[i];
-                    switch (b->type) {
-                    case WIDGET_ICON: icon_blueprint(b); break;
-                    case WIDGET_BUTTON: box_blueprint(b, 0); break;
-                    case WIDGET_SLIDER: slider_blueprint(b); break;
-                    case WIDGET_SBOX: sbox_blueprint(b); break;
-                    default: blueprint(p, b); break;}
-                }
-            } break;
-            case PROC_LAYOUT: {
-                struct process_layouting *op = &p->layout;
-                for (i = op->begin; i != op->end; i += op->inc) {
-                    struct box *b = op->boxes[i];
-                    switch (b->type) {
-                    case WIDGET_ICON: icon_layout(b); break;
-                    case WIDGET_BUTTON: box_layout(b, 0); break;
-                    case WIDGET_SLIDER: slider_layout(b); break;
-                    case WIDGET_SBOX: sbox_layout(b); break;
-                    default: layout(p, b); break;}
-                }
-            } break;
-           case PROC_TRANSFORM: {
-                struct process_layouting *op = &p->layout;
-                for (i = op->begin; i != op->end; i += op->inc) {
-                    struct box *b = op->boxes[i];
-                    switch (b->type) {
-                    default: transform(p, b); break;}
-                }
-            } break;}
-            process_end(p);
-        }}
-
-        /* Process: Input */
-        {int i; union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_INPUT))) {
-            struct list_hook *it = 0;
-            struct process_input *op = &p->input;
-            list_foreach(it, &op->evts) {
-                union event *evt = list_entry(it, union event, hdr.hook);
-                for (i = 0; i < evt->hdr.cnt; i++) {
-                    struct box *b = evt->hdr.boxes[i];
-                    switch (b->type) {
-                    case WIDGET_SLIDER: slider_input(b, evt); break;
-                    default: input(p, evt, b); break;}
-                }
-            } process_end(p);
-        }}
-
-        /* Process: Paint */
+        /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
         glClearColor(0.10f, 0.18f, 0.24f, 1);
         nvgBeginFrame(vg, 1000, 600, 1.0f);
-        {int i = 0; union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_PAINT))) {
-            struct process_paint *op = &p->paint;
-            struct rect scissor = {0,0,1000,600};
-            for (i = 0; i < op->cnt; ++i) {
-                struct box *b = op->boxes[i];
-                switch (b->type) {
-                case WIDGET_ICON: nvgIcon(vg, b); break;
-                case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
-                case WIDGET_SLIDER: nvgSlider(vg, b); break;
-                case WIDGET_CLIP_REGION: nvgClipRegion(vg, b, &scissor);
-                default: break;}
-            } nvgResetScissor(vg);
-            process_end(p);
-        }} nvgEndFrame(vg);
+        ui_update(ctx);
+        ui_paint(vg, ctx, 1000, 600);
+        nvgEndFrame(vg);
 
-        /* Process: Clear */
-        {union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_CLEAR))) {
-            free(p->mem.ptr);
-            process_end(p);
-        }}
         /* Finish frame */
         SDL_GL_SwapWindow(win);
         SDL_Delay(16);
     }
-    /* Process: Serialize */
-    {union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_SERIALIZE))) {
-        struct process_serialize *serial = &p->serial;
-        if (p->type != PROC_FILL_SERIAL_CONFIG) break;
-        serial->type = SERIALIZE_TABLES;
-        serial->file = stdout;
-        serial->id = id("ui");
-        serial->str = "ui";
-        process_end(p);
-    }}
-    /* Process: Cleanup */
-    {union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_CLEANUP))) {
-        free(p->mem.ptr);
-        process_end(p);
-    }} destroy(ctx);
+    ui_serialize_table(ctx, stdout, id("ui"), "ui");
+    ui_cleanup(ctx);
 
     /* System: Cleanup */
     nvgDeleteGL2(vg);
