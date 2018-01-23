@@ -11,6 +11,7 @@
 #include <stdio.h> /* fprintf, fputc */
 
 /* TODO: Library
+ * - Solve input handling
  * - Remove resizing and directly set tree root box size, so input won't cause
  *   another layouting iteration.
  * - Solve storing persistent state
@@ -141,7 +142,7 @@ struct element {
 struct component {
     unsigned version;
     unsigned id;
-    int depth;
+    int tree_depth, depth;
 
     const struct element *elms;
     const int elmcnt;
@@ -264,10 +265,11 @@ struct repository {
     struct table tbl;
     struct box *boxes;
     struct box **bfs;
-    int boxcnt, depth;
     union param *params;
+    int boxcnt;
     int argcnt;
-    int size;
+    int depth;
+    int tree_depth;
 };
 struct module {
     struct list_hook hook;
@@ -590,7 +592,7 @@ static const struct element g_root_elements[] = {
 static const unsigned g_root_table_keys[] = {0,1,2,3,4,5,6,0};
 static const unsigned g_root_table_vals[] = {0,1,2,3,4,5,6,0};
 static const struct component g_root = {
-    VERSION, 0, 7,
+    VERSION, 0, 7, 0,
     g_root_elements, cntof(g_root_elements),
     g_root_table_vals, g_root_table_keys, 8,
     NULL, 0, NULL, NULL
@@ -1236,6 +1238,33 @@ link(struct state *s, unsigned id)
     p[1].id = id;
     op_add(s, p, cntof(p));}
 }
+api const struct box*
+poll(struct state *s, unsigned id)
+{
+    int idx = 0;
+    struct repository *repo;
+    repo = s->repo;
+    if (!repo) return 0;
+    idx = lookup(&repo->tbl, id);
+    if (!idx) return 0;
+    return repo->boxes + idx;
+}
+api const struct box*
+query(struct context *ctx, unsigned mid, unsigned id)
+{
+    int idx = 0;
+    struct module *m = 0;
+    struct repository *repo = 0;
+
+    m = module_find(ctx, mid);
+    if (!m) return 0;
+    repo = m->repo[m->repoid];
+    if (!repo) return 0;
+
+    idx = lookup(&repo->tbl, id);
+    if (!idx) return 0;
+    return repo->boxes + idx;
+}
 api void
 widget_begin(struct state *s, int type)
 {
@@ -1809,11 +1838,12 @@ process_begin(struct context *ctx, unsigned flags)
 
         /* setup module root box */
         m->root = repo->boxes;
+        m->root->flags = BOX_INTERACTIVE;
+        m->root->type = WIDGET_PANEL;
         list_init(&m->root->node);
         list_init(&m->root->lnks);
         transform_init(&m->root->tloc);
         transform_init(&m->root->tscr);
-        m->root->type = WIDGET_PANEL;
 
         /* II.) Setup repository data */
         {struct gizmo {int type, params, argi, argc;} gstk[MAX_TREE_DEPTH];
@@ -1867,18 +1897,23 @@ process_begin(struct context *ctx, unsigned flags)
                 struct box *b = m->root;
                 list_del(&b->node);
                 list_add_tail(&pb->lnks, &b->node);
+                repo->tree_depth = prepo->tree_depth + pb->depth;
                 b->parent = pb;}
             } break;
             case OP_BUF_DLINK: {
                 /* find child module */
+                struct repository *crepo;
                 struct module *cm = module_find(ctx, op[1].id);
                 if (!cm->root) break;
+                crepo = cm->repo[cm->repoid];
+                if (!crepo) break;
 
                 /* link referenced module root box into current box in module */
                 {struct box *pb = boxstk[depth-1];
                 struct box *b = cm->root;
                 list_del(&b->node);
                 list_add_tail(&pb->lnks, &b->node);
+                crepo->tree_depth = repo->tree_depth + depth;
                 b->parent = pb;}
             } break;
 
@@ -1929,7 +1964,7 @@ process_begin(struct context *ctx, unsigned flags)
                 assert(gtop > 0);
                 g = &gstk[gtop-1];
 
-                /* setup box tree node */
+                /* setup box */
                 {struct box *b = repo->boxes + idx;
                 transform_init(&b->tloc);
                 transform_init(&b->tscr);
@@ -1945,16 +1980,27 @@ process_begin(struct context *ctx, unsigned flags)
                 /* link box into parent */
                 list_init(&b->node);
                 list_init(&b->lnks);
-                list_add_tail(&pb->lnks, &b->node);
 
+                /* update tracked hot boxes */
+                list_add_tail(&pb->lnks, &b->node);
+                if (b->id == ctx->active->id)
+                    ctx->active = b;
+                if (b->id == ctx->origin->id)
+                    ctx->origin = b;
+                if (b->id == ctx->hot->id)
+                    ctx->hot = b;
+
+                /* push box into stack */
                 assert(depth < MAX_TREE_DEPTH);
                 boxstk[depth++] = b;}
             } break;}
             op += opdefs[op[0].op].argc + 1;
         } eol0:;}
+
         repo->bfs = bfs(repo->bfs, repo->boxes);
         ctx->unbalanced = 1;
         if (old) list_del(&old->boxes[0].node);
+        m->repo[!m->repoid] = 0;
 
         /* III.) Free old repository */
         operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
@@ -2272,8 +2318,7 @@ process_begin(struct context *ctx, unsigned flags)
         list_foreach(pi, &ctx->mod) {
             struct module *m = list_entry(pi, struct module, hook);
             struct repository *r = m->repo[m->repoid];
-            struct box *pb = r->boxes[i].parent;
-            depth = max(depth, r->depth + ((pb) ? pb->depth: 0) + 1);
+            depth = max(depth, r->tree_depth + r->depth);
             p->paint.cnt += r->boxcnt;
         }
         /* generate list of boxes in DFS-order */
@@ -2314,6 +2359,7 @@ process_begin(struct context *ctx, unsigned flags)
         union process *p = &ctx->proc;
         FILE *fp = p->serial.file;
         list_foreach(si, &ctx->states) {
+            /* find correct module */
             struct state *s = list_entry(si, struct state, hook);
             union param *op = &s->list->ops[s->op_begin];
             if (s->id != p->serial.id) continue;
@@ -2322,6 +2368,7 @@ process_begin(struct context *ctx, unsigned flags)
                 switch (op->type) {
                 case OP_NEXT_BUF: op = (union param*)op[1].p; break;
                 default: {
+                    /* print out each argument from string format */
                     const char *str = def->str;
                     while (*str) {
                         if (*str != '%') {
@@ -2368,6 +2415,7 @@ process_begin(struct context *ctx, unsigned flags)
         else jmpto(ctx, STATE_DONE);
     }
     case STATE_SERIALIZE_TABLE: {
+        /* generate box flags */
         static const struct property_def {
             const char *name; int len;
         } property_info[] = {
@@ -2401,9 +2449,9 @@ process_begin(struct context *ctx, unsigned flags)
             } fprintf(fp, "    {%d, %u, %u, %u, %d, %s},\n",
                 b->type, b->id, pid, b->wid, b->depth, buf);
         } fprintf(fp, "};\n");
-        fprintf(fp, "const unsigned g_%s_tbl_keys[%d] = {\n    ",p->serial.str,r->tbl.cnt);
+        fprintf(fp, "const unsigned g_%s_tbl_keys[%d] = {\n    ",p->serial.str, r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
-            if (i && !(i & 0x0F)) fprintf(fp, "\n    ");
+            if (i && !(i & 0x07)) fprintf(fp, "\n    ");
             fprintf(fp, "%u", r->tbl.keys[i]);
             if (i < r->tbl.cnt-1) fputc(',', fp);
         } fprintf(fp, "\n};\n");
@@ -2415,13 +2463,13 @@ process_begin(struct context *ctx, unsigned flags)
         } fprintf(fp, "\n};\n");
         fprintf(fp, "struct box *g_%s_bfs[%d];\n", p->serial.str, r->boxcnt+1);
         fprintf(fp, "struct box g_%s_boxes[%d];\n", p->serial.str, r->boxcnt);
-        fprintf(fp, "struct repository g_%s_repository;\n", p->serial.str);
         fprintf(fp, "struct module g_%s_module;\n", p->serial.str);
+        fprintf(fp, "struct repository g_%s_repository;\n", p->serial.str);
         fprintf(fp, "const struct component g_%s_component = {\n", p->serial.str);
         fprintf(fp, "    %d, g_%s_elements,", VERSION, p->serial.str);
         fprintf(fp, "cntof(g_%s_elements),\n", p->serial.str);
         fprintf(fp, "    g_%s_tbl_vals, g_%s_tbl_keys", p->serial.str, p->serial.str);
-        fprintf(fp, "cntof(g_%s_tbl), %d \n", p->serial.str, r->depth);
+        fprintf(fp, "cntof(g_%s_tbl), %d, %d \n", p->serial.str, r->depth, r->tree_depth);
         fprintf(fp, "    g_%s_module, g_%s_repo", p->serial.str, p->serial.str);
         fprintf(fp, "g_%s_boxes, g_%s_bfs,", p->serial.str, p->serial.str);
         fprintf(fp, "cntof(g_%s_boxes)\n", p->serial.str);
@@ -2443,16 +2491,30 @@ process_begin(struct context *ctx, unsigned flags)
                 free_blocks(&ctx->blkmem);
             jmpto(ctx, STATE_DONE);
         }
+        /* free temporary frame repository memory */
         ctx->iter = ctx->garbage.next;
         m = list_entry(ctx->iter, struct module, hook);
-        list_del(&m->hook);
+        if (m->repo[m->repoid]) {
+            operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
+            p->mem.ptr = m->repo[m->repoid];
+            m->repo[m->repoid] = 0;
+            return p;
+        }
+        if (m->repo[!m->repoid]) {
+            operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
+            p->mem.ptr = m->repo[!m->repoid];
+            m->repo[!m->repoid] = 0;
+            return p;
+        } list_del(&m->hook);
 
+        /* free persistent module memory */
         operation_begin(p, PROC_FREE, ctx, &ctx->arena);
         p->mem.ptr = m;
         return p;
     }
     case STATE_CLEANUP: {
         /* free all memory */
+        list_del(&ctx->root.hook);
         list_splice_tail(&ctx->garbage, &ctx->mod);
         jmpto(ctx, STATE_CLEAR);
     }
@@ -2813,11 +2875,36 @@ icon_layout(struct box *b)
 /* ---------------------------------------------------------------------------
  *                                  BUTTON
  * --------------------------------------------------------------------------- */
-api unsigned
+struct button {
+    unsigned id;
+    unsigned clicked:1;
+    unsigned pressed:1;
+    unsigned released:1;
+    unsigned entered:1;
+    unsigned exited:1;
+};
+api int
+button_poll(struct state *s, struct button *btn)
+{
+    const struct box *b = poll(s, btn->id);
+    zero(btn, szof(*btn));
+    if (!b) return 0;
+    btn->clicked = b->clicked;
+    btn->pressed = b->pressed;
+    btn->released = b->released;
+    btn->entered = b->entered;
+    btn->exited = b->exited;
+    return 1;
+}
+api struct button
 button_begin(struct state *s)
 {
+    struct button btn;
+    zero(&btn, szof(btn));
     widget_begin(s, WIDGET_BUTTON);
-    return widget_box_push(s, BOX_INTERACTIVE);
+    btn.id = widget_box_push(s, BOX_INTERACTIVE);
+    button_poll(s, &btn);
+    return btn;
 }
 api void
 button_end(struct state *s)
@@ -3418,6 +3505,9 @@ api void
 nvgIcon(struct NVGcontext *vg, struct box *b)
 {
     int sym = b->params[0].i;
+    nvgBeginPath(vg);
+    nvgFillColor(vg, nvgRGBA(190,190,190,255));
+
     switch (sym) {
     default: assert(0); break;
     case ICON_CIRCLE_SOLID:
@@ -3426,54 +3516,42 @@ nvgIcon(struct NVGcontext *vg, struct box *b)
         float cy = b->scr.y +(int)(b->scr.h*0.5f);
         float kr = b->scr.h / 2;
 
-        nvgBeginPath(vg);
         nvgCircle(vg, cx,cy, kr);
-        nvgFillColor(vg, nvgRGBA(200,200,200,255));
         if (sym == ICON_CIRCLE_SOLID) nvgFill(vg);
         else nvgStroke(vg);
     } break;
     case ICON_RECT_SOLID:
     case ICON_RECT_OUTLINE: {
-        nvgBeginPath(vg);
         nvgRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h);
-        nvgFillColor(vg, nvgRGBA(200,200,200,255));
         if (sym == ICON_RECT_SOLID) nvgFill(vg);
         else nvgStroke(vg);
     } break;
     case ICON_TRIANGLE_UP: {
-        nvgBeginPath(vg);
         nvgMoveTo(vg, b->scr.x + b->scr.w*0.5f, b->scr.y);
         nvgLineTo(vg, b->scr.x, b->scr.y + b->scr.h);
         nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h);
         nvgClosePath(vg);
-        nvgFillColor(vg, nvgRGBA(200,200,200,255));
         nvgFill(vg);
     } break;
     case ICON_TRIANGLE_DOWN: {
-        nvgBeginPath(vg);
         nvgMoveTo(vg, b->scr.x, b->scr.y);
         nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y);
         nvgLineTo(vg, b->scr.x + b->scr.w*0.5f, b->scr.y + b->scr.h);
         nvgClosePath(vg);
-        nvgFillColor(vg, nvgRGBA(200,200,200,255));
         nvgFill(vg);
     } break;
     case ICON_TRIANGLE_LEFT: {
-        nvgBeginPath(vg);
         nvgMoveTo(vg, b->scr.x, b->scr.y + b->scr.h * 0.5f);
         nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y);
         nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h);
         nvgClosePath(vg);
-        nvgFillColor(vg, nvgRGBA(200,200,200,255));
         nvgFill(vg);
     } break;
     case ICON_TRIANGLE_RIGHT: {
-        nvgBeginPath(vg);
         nvgMoveTo(vg, b->scr.x, b->scr.y);
         nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h * 0.5f);
         nvgLineTo(vg, b->scr.x, b->scr.y + b->scr.h);
         nvgClosePath(vg);
-        nvgFillColor(vg, nvgRGBA(200,200,200,255));
         nvgFill(vg);
     } break;};
 }
@@ -3502,6 +3580,14 @@ nvgClipRegion(struct NVGcontext *vg, struct box *b, struct rect *sis)
         nvgScissor(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h);
         *sis = b->scr;
     }
+}
+api void
+nvgStrokeRect(struct NVGcontext *vg, int x, int y, int w, int h, NVGcolor col)
+{
+    nvgBeginPath(vg);
+    nvgFillColor(vg, col);
+    nvgRect(vg, x+1, y+1, w-2, h-2);
+    nvgStroke(vg);
 }
 /* ---------------------------------------------------------------------------
  *                                  PLATFORM
@@ -3584,12 +3670,20 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
 
         for (i = 0; i < op->cnt; ++i) {
             struct box *b = op->boxes[i];
+#if 1
             switch (b->type) {
             case WIDGET_ICON: nvgIcon(vg, b); break;
             case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
             case WIDGET_SLIDER: nvgSlider(vg, b); break;
             case WIDGET_CLIP_REGION: nvgClipRegion(vg, b, &scissor);
             default: break;}
+#else
+            if (b == ctx->active)
+                nvgStrokeRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, nvgRGBA(255,0,0,255));
+            else if (b == ctx->hot)
+                nvgStrokeRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, nvgRGBA(0,255,0,255));
+            else nvgStrokeRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, nvgRGBA(255,255,255,255));
+#endif
         } nvgResetScissor(vg);
         process_end(p);
     }
@@ -3665,6 +3759,7 @@ int main(void)
     struct NVGcontext *vg;
     SDL_GLContext glContext;
 
+    /* SDL */
     SDL_Window *win = 0;
     SDL_Init(SDL_INIT_VIDEO);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -3673,11 +3768,10 @@ int main(void)
     win = SDL_CreateWindow("GUI", SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED, 1000, 600, SDL_WINDOW_SHOWN|SDL_WINDOW_OPENGL);
     glContext = SDL_GL_CreateContext(win);
-
-    ctx = create(DEFAULT_ALLOCATOR);
     vg = nvgCreateGL2(NVG_ANTIALIAS);
     if (!vg) return -1;
 
+    ctx = create(DEFAULT_ALLOCATOR);
     input_resize(ctx, 1000, 600);
     while (!quit) {
         SDL_Event evt;
@@ -3689,14 +3783,16 @@ int main(void)
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
-            button_begin(s); {
+            struct button btn = button_begin(s); {
                 struct sbox sbx = sbox_begin(s);
-                *sbx.pad = 8;
                 *sbx.halign = SBOX_HALIGN_CENTER;
                 *sbx.valign = SBOX_VALIGN_CENTER;
+                *sbx.pad = 8;
                     icon(s, ICON_TRIANGLE_DOWN);
                 sbox_end(s);
             } button_end(s);
+            if (btn.clicked)
+                fprintf(stdout, "button clicked!\n");
         } end(s);}
 
         /* Paint */
@@ -3714,7 +3810,7 @@ int main(void)
     ui_serialize_table(ctx, stdout, id("ui"), "ui");
     ui_cleanup(ctx);
 
-    /* System: Cleanup */
+    /* Cleanup */
     nvgDeleteGL2(vg);
     SDL_DestroyWindow(win);
     SDL_Quit();
