@@ -88,6 +88,7 @@ struct memory_arena {
 /* input */
 enum mouse_button {
     MOUSE_BUTTON_LEFT,
+    MOUSE_BUTTON_MIDDLE,
     MOUSE_BUTTON_RIGHT,
     MOUSE_BUTTON_COUNT
 };
@@ -207,7 +208,7 @@ struct box {
     unsigned scrolled:1;
 
     /* node */
-    int depth;
+    int depth, tree_depth;
     struct list_hook node;
     struct list_hook lnks;
     struct box *parent;
@@ -299,6 +300,7 @@ enum event_type {
 struct event_header {
     enum event_type type;
     int cap, cnt;
+    struct input *input;
     struct box *origin;
     struct box **boxes;
     struct list_hook hook;
@@ -376,7 +378,7 @@ enum processes {
     PROCESS_BLUEPRINT = PROCESS_COMMIT|flag(PROC_BLUEPRINT),
     PROCESS_LAYOUT = PROCESS_BLUEPRINT|flag(PROC_LAYOUT),
     PROCESS_TRANSFORM = PROCESS_LAYOUT|flag(PROC_TRANSFORM),
-    PROCESS_LAYOUTING = PROCESS_TRANSFORM,
+
     PROCESS_INPUT = PROCESS_TRANSFORM|flag(PROC_INPUT),
     PROCESS_PAINT = PROCESS_TRANSFORM|flag(PROC_PAINT),
     PROCESS_SERIALIZE = PROCESS_COMMIT|flag(PROC_SERIALIZE),
@@ -446,7 +448,7 @@ enum widget_internal {
     WIDGET_UI,
     WIDGET_LAYER_END = WIDGET_UI,
     /* widgets */
-    WIDGET_PANEL,
+    WIDGET_TREE_ROOT,
     WIDGET_POPUP_PANEL,
     WIDGET_CONTEXTUAL_PANEL,
     WIDGET_SLOT
@@ -539,7 +541,7 @@ api void widget_end(struct state *s);
 
 /* box */
 api void box_shrink(struct box *d, const struct box *s, int pad);
-api void box_blueprint(struct box *b, int pad);
+api void box_blueprint(struct box *b, int padx, int pady);
 api void box_layout(struct box *b, int pad);
 
 /* id */
@@ -1036,6 +1038,16 @@ box_shrink(struct box *d, const struct box *s, int pad)
     d->loc.y = s->loc.y + pad;
     d->loc.w = max(0, s->loc.w - 2*pad);
     d->loc.h = max(0, s->loc.h - 2*pad);
+}
+api void
+box_pad(struct box *d, const struct box *s, int padx, int pady)
+{
+    assert(d && s);
+    if (!d || !s) return;
+    d->loc.x = s->loc.x + padx;
+    d->loc.y = s->loc.y + pady;
+    d->loc.w = max(0, s->loc.w - 2*padx);
+    d->loc.h = max(0, s->loc.h - 2*pady);
 }
 intern void
 transform_init(struct transform *t)
@@ -1585,15 +1597,15 @@ operation_end(union process *p)
     temp_memory_end(p->hdr.tmp);
 }
 api void
-box_blueprint(struct box *b, int pad)
+box_blueprint(struct box *b, int padx, int pady)
 {
     assert(b);
     if (!b) return;
     {struct list_hook *i = 0;
     list_foreach(i, &b->lnks) {
         const struct box *n = list_entry(i, struct box, node);
-        b->dw = max(b->dw, n->dw + 2*pad);
-        b->dh = max(b->dh, n->dh + 2*pad);
+        b->dw = max(b->dw, n->dw + 2*padx);
+        b->dh = max(b->dh, n->dh + 2*pady);
     }}
 }
 api void
@@ -1652,8 +1664,9 @@ event_begin(union process *p, enum event_type type, struct box *orig)
     list_add_tail(&p->input.evts, &res->hdr.hook);
 
     res->type = type;
+    res->hdr.input = p->input.state;
     res->hdr.origin = orig;
-    res->hdr.cap = orig->depth + 1;
+    res->hdr.cap = orig->tree_depth + 1;
     res->hdr.boxes = arena_push_array(p->hdr.arena, res->hdr.cap, struct box*);
     event_add_box(res, orig);
     return res;
@@ -1707,8 +1720,8 @@ process_begin(struct context *ctx, unsigned flags)
     #define jmpto(ctx,s) do{(ctx)->state = (s); goto r;}while(0)
     enum processing_states {
         STATE_DISPATCH,
-        STATE_COMMIT, STATE_CALC_REQ_MEMORY,
-        STATE_ALLOC_PERSISTENT, STATE_ALLOC_TEMPORARY, STATE_COMPILE,
+        STATE_COMMIT, STATE_CALC_REQ_MEMORY, STATE_ALLOC_PERSISTENT,
+        STATE_ALLOC_TEMPORARY, STATE_COMPILE,
         STATE_BLUEPRINT, STATE_LAYOUTING, STATE_TRANSFORM,
         STATE_INPUT, STATE_PAINT,
         STATE_SERIALIZE, STATE_SERIALIZE_DISPATCH,
@@ -1745,12 +1758,22 @@ process_begin(struct context *ctx, unsigned flags)
         union process *p = &ctx->proc;
         ctx->iter = it(&ctx->states, ctx->iter);
         if (!ctx->iter) {
+            /* calculate box tree depth */
+            if (ctx->unbalanced && !list_empty(&ctx->states)) {
+                struct list_hook *it = 0;
+                list_foreach(it, &ctx->mod) {
+                    struct module *m = list_entry(it, struct module, hook);
+                    struct repository *r = m->repo[m->repoid];
+                    for (i = 0; i < r->boxcnt; ++i)
+                        r->boxes[i].tree_depth = r->boxes[i].depth + r->depth;
+                }
+            }
             /* free states */
-            struct list_hook *si = 0;
+            {struct list_hook *si = 0;
             list_foreach(si, &ctx->states) {
                 s = list_entry(si, struct state, hook);
                 arena_clear(&s->arena);
-            } list_init(&ctx->states);
+            } list_init(&ctx->states);}
 
             /* state transition table */
             if ((flags & flag(PROC_BLUEPRINT)) && ctx->unbalanced)
@@ -1839,7 +1862,7 @@ process_begin(struct context *ctx, unsigned flags)
         /* setup module root box */
         m->root = repo->boxes;
         m->root->flags = BOX_INTERACTIVE;
-        m->root->type = WIDGET_PANEL;
+        m->root->type = WIDGET_TREE_ROOT;
         list_init(&m->root->node);
         list_init(&m->root->lnks);
         transform_init(&m->root->tloc);
@@ -2538,14 +2561,14 @@ blueprint(union process *op, struct box *b)
             b->dw = ctx->input.width;
             b->dh = ctx->input.height;
         } break;
-        case WIDGET_PANEL:
+        case WIDGET_TREE_ROOT:
         case WIDGET_SLOT: {
-            box_blueprint(b,0);
+            box_blueprint(b,0,0);
         } break;}
-    } else box_blueprint(b,0);
+    } else box_blueprint(b,0,0);
 }
 intern void
-layout_copy(struct box *b)
+layout_default(struct box *b)
 {
     struct list_hook *i = 0;
     list_foreach(i, &b->lnks) {
@@ -2557,18 +2580,6 @@ layout_copy(struct box *b)
         n->loc.h = b->loc.h;
     }
 }
-intern void
-layout_default(struct box *b)
-{
-    struct list_hook *i = 0;
-    list_foreach(i, &b->lnks) {
-        struct box *n = list_entry(i, struct box, node);
-        n->loc.x = max(b->loc.x, n->loc.x);
-        n->loc.y = max(b->loc.y, n->loc.y);
-        n->loc.w = min(n->dw, (b->loc.x+b->loc.w)-n->loc.x);
-        n->loc.h = min(n->dh, (b->loc.y+b->loc.h)-n->loc.y);
-    }
-}
 api void
 layout(union process *op, struct box *b)
 {
@@ -2577,18 +2588,18 @@ layout(union process *op, struct box *b)
         {box_layout(b, 0); return;}
 
     switch (b->type) {
-    case WIDGET_PANEL:
+    case WIDGET_TREE_ROOT:
     case WIDGET_SLOT:
         layout_default(b); break;
     case WIDGET_ROOT:
         b->loc.w = ctx->input.width;
         b->loc.h = ctx->input.height;
-        layout_copy(b);
+        layout_default(b);
         break;
     case WIDGET_OVERLAY:
     case WIDGET_UNBLOCKING:
     case WIDGET_BLOCKING:
-        layout_copy(b); break;
+        layout_default(b); break;
     case WIDGET_UI:
         layout_default(b); break;
     case WIDGET_POPUP:
@@ -2824,11 +2835,19 @@ enum widget_type {
     /* Layouting */
     WIDGET_SBOX,
     WIDGET_FLEX_BOX,
+    /* Regions */
     WIDGET_CLIP_REGION,
     WIDGET_SCROLL_REGION,
-    WIDGET_SCROLLBAR_REGION,
+    WIDGET_SCROLLED_REGION,
+    WIDGET_PANEL,
     WIDGET_TYPE_COUNT
 };
+enum widget_shortcuts {
+    SHORTCUT_SCROLL_REGION_SCROLL,
+    SHORTCUT_SCROLL_REGION_RESET,
+    SHORTCUT_COUNT
+};
+
 /* ---------------------------------------------------------------------------
  *                                  ICON
  * --------------------------------------------------------------------------- */
@@ -2921,26 +2940,29 @@ struct slider {
     float *min;
     float *value;
     float *max;
+    int *cursor_size;
 };
 api struct slider
-slider(struct box *b)
+slider_ref(struct box *b)
 {
     struct slider sld;
     union param *p = b->params;
     sld.min = &p[0].f;
     sld.value = &p[1].f;
     sld.max = &p[2].f;
-    sld.cid = p[3].id;
+    sld.max = &p[3].f;
+    sld.cid = p[4].id;
     return sld;
 }
 api struct slider
 sliderf(struct state *s, float min, float *value, float max)
 {
-    struct slider sld;
-    widget_begin(s, WIDGET_BUTTON);
+    struct slider sld = {0};
+    widget_begin(s, WIDGET_SLIDER);
         sld.min = widget_push_param_float(s, min);
         sld.value = widget_push_modifier_float(s, value);
         sld.max = widget_push_param_float(s, max);
+        sld.cursor_size = widget_push_param_int(s, 8);
         sld.id = widget_box_push(s, BOX_INTERACTIVE);
             sld.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X);
             widget_push_param_id(s, sld.cid);
@@ -2951,18 +2973,18 @@ sliderf(struct state *s, float min, float *value, float max)
 api void
 slider_blueprint(struct box *b)
 {
-    static const cursor_size = 8;
-    struct slider sld = slider(b);
+    struct slider sld = slider_ref(b);
+    const int cursor_size = *sld.cursor_size;
     if (b->id == sld.cid) {
-        box_blueprint(b, 0);
+        box_blueprint(b, 0, 0);
         b->dw = max(b->dw, cursor_size);
         b->dh = max(b->dh, cursor_size);
-    } else box_blueprint(b, 0);
+    } else box_blueprint(b, 0, 0);
 }
 api void
 slider_layout(struct box *b)
 {
-    struct slider sld = slider(b);
+    struct slider sld = slider_ref(b);
     if (b->id != sld.cid)
         {box_layout(b, 0); return;}
 
@@ -2972,7 +2994,7 @@ slider_layout(struct box *b)
     float sld_val = clamp(sld_min, *sld.value, sld_max);
     float cur_off = (sld_val - sld_min) / sld_max;
 
-    static const cursor_size = 8;
+    const int cursor_size = *sld.cursor_size;
     int x = p->loc.x + cursor_size/2;
     int w = p->loc.w - cursor_size;
 
@@ -2985,7 +3007,7 @@ api void
 slider_input(struct box *b, const union event *evt)
 {
     struct box *p = b->parent;
-    struct slider sld = slider(b);
+    struct slider sld = slider_ref(b);
     if (b->id != sld.cid) return;
     if (!b->moved || evt->type != EVT_MOVED)
         return;
@@ -2995,11 +3017,102 @@ slider_input(struct box *b, const union event *evt)
     b->loc.x = min(p->loc.x + p->loc.w - b->loc.w, b->loc.x);
     b->loc.x = max(p->loc.x, b->loc.x);
 
-    {static const cursor_size = 8;
+    {const int cursor_size = *sld.cursor_size;
     int x = p->loc.x, w = p->loc.w - cursor_size;
     *sld.value = cast(float,(b->loc.x - x)) / cast(float,w);
     *sld.value = (*sld.value * sld_max) + sld_min;}}
 }
+/* ---------------------------------------------------------------------------
+ *                                  SCROLL
+ * --------------------------------------------------------------------------- */
+struct scroll {
+    unsigned id;
+    unsigned cid;
+    float *total_x;
+    float *total_y;
+    float *size_x;
+    float *size_y;
+    float *off_x;
+    float *off_y;
+};
+api struct scroll
+scroll_ref(struct box *b)
+{
+    struct scroll scrl = {0};
+    union param *p = b->params;
+    scrl.total_x = &p[0].f;
+    scrl.total_y = &p[1].f;
+    scrl.size_x = &p[2].f;
+    scrl.size_y = &p[3].f;
+    scrl.off_x = &p[4].f;
+    scrl.off_y = &p[5].f;
+    return scrl;
+}
+api struct scroll
+scroll_begin(struct state *s)
+{
+    struct scroll scrl = {0};
+    widget_begin(s, WIDGET_SCROLL);
+    scrl.total_x = widget_push_param_float(s, 1);
+    scrl.total_y = widget_push_param_float(s, 1);
+    scrl.size_x = widget_push_param_float(s, 1);
+    scrl.size_y = widget_push_param_float(s, 1);
+    scrl.off_x = widget_push_param_float(s, 0);
+    scrl.off_y = widget_push_param_float(s, 0);
+    scrl.id = widget_box_push(s, BOX_INTERACTIVE);
+    scrl.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X|BOX_MOVABLE_Y);
+    widget_push_param_id(s, scrl.cid);
+    return scrl;
+}
+api void
+scroll_end(struct state *s)
+{
+    widget_box_pop(s);
+    widget_end(s);
+}
+api struct scroll
+scroll(struct state *s)
+{
+    struct scroll scrl;
+    scrl = scroll_begin(s);
+    scroll_end(s);
+    return scrl;
+}
+api void
+scroll_layout(struct box *b)
+{
+    struct box *p = b->parent;
+    struct scroll scrl = scroll_ref(b);
+    if (b->id != scrl.cid)
+        {box_layout(b, 0); return;}
+
+    *scrl.total_x = max(*scrl.total_x, *scrl.size_x);
+    *scrl.total_y = max(*scrl.total_y, *scrl.size_y);
+    *scrl.off_x = clamp(0, *scrl.off_x, *scrl.total_x - *scrl.size_x);
+    *scrl.off_y = clamp(0, *scrl.off_y, *scrl.total_y - *scrl.size_y);
+
+    b->scr.x = floori((float)p->scr.x + roundf(*scrl.off_x / *scrl.total_x) * (float)p->scr.w);
+    b->scr.y = floori((float)p->scr.y + roundf(*scrl.off_x / *scrl.total_y) * (float)p->scr.h);
+    b->scr.w = ceili((*scrl.size_x / *scrl.total_x) * (float)p->scr.w);
+    b->scr.h = ceili((*scrl.size_y / *scrl.total_y) * (float)p->scr.h);
+}
+api void
+scroll_input(struct box *b, const union event *evt)
+{
+    struct box *p = b->parent;
+    struct scroll scrl = scroll_ref(b);
+    if (b->id != scrl.cid) return;
+    if (evt->type != EVT_MOVED || evt->hdr.origin != b)
+        return;
+
+    {int scrl_x = b->scr.x - p->scr.x;
+    int scrl_y = b->scr.y - p->scr.y;
+    float scrl_rx = cast(float, scrl_x) / cast(float, p->scr.w);
+    float scrl_ry = cast(float, scrl_y) / cast(float, p->scr.h);
+    *scrl.off_x = clamp(0, scrl_rx * *scrl.total_x, *scrl.total_x - *scrl.size_x);
+    *scrl.off_y = clamp(0, scrl_ry * *scrl.total_y, *scrl.total_y - *scrl.size_y);}
+}
+
 /* ---------------------------------------------------------------------------
  *                                  SBOX
  * --------------------------------------------------------------------------- */
@@ -3018,62 +3131,89 @@ struct sbox {
     unsigned content;
     int *valign;
     int *halign;
-    int *pad;
+    int *padx;
+    int *pady;
 };
 api struct sbox
-sbox(struct box *b)
+sbox_ref(struct box *b)
 {
     struct sbox sbx;
     union param *p = b->params;
     sbx.valign = &p[0].i;
     sbx.halign = &p[1].i;
-    sbx.pad = &p[2].i;
-    sbx.content = p[3].id;
+    sbx.padx = &p[2].i;
+    sbx.pady = &p[3].i;
+    sbx.content = p[4].id;
     sbx.id = b->id;
     return sbx;
+}
+api struct sbox
+sbox_begin(struct state *s)
+{
+    struct sbox sbx;
+    widget_begin(s, WIDGET_SBOX);
+    sbx.valign = widget_push_param_int(s, SBOX_VALIGN_TOP);
+    sbx.halign = widget_push_param_int(s, SBOX_HALIGN_LEFT);
+    sbx.padx = widget_push_param_int(s, 4);
+    sbx.pady = widget_push_param_int(s, 4);
+    sbx.id = widget_box_push(s, BOX_INTERACTIVE);
+    sbx.content = widget_box_push(s, BOX_INTERACTIVE);
+    widget_push_param_id(s, sbx.content);
+    return sbx;
+}
+api void
+sbox_end(struct state *s)
+{
+    widget_box_pop(s);
+    widget_box_pop(s);
+    widget_end(s);
 }
 api void
 sbox_blueprint(struct box *b)
 {
-    struct sbox sbx = sbox(b);
+    struct sbox sbx = sbox_ref(b);
     if (b->id != sbx.content)
-        box_blueprint(b, *sbx.pad);
-    else box_blueprint(b, 0);
+        box_blueprint(b, *sbx.padx, *sbx.pady);
+    else box_blueprint(b, 0, 0);
 }
 api void
 sbox_layout(struct box *b)
 {
+    struct box *p = b->parent;
     struct list_hook *h = 0;
-    struct sbox sbx = sbox(b);
+    struct sbox sbx = sbox_ref(b);
     if (b->id != sbx.content) return;
-    box_shrink(b, b->parent, *sbx.pad);
+    box_pad(b, p, *sbx.padx, *sbx.pady);
 
+    /* horizontal alignment */
     switch (*sbx.halign) {
     case SBOX_HALIGN_LEFT:
         list_foreach(h, &b->lnks) {
             struct box *n = list_entry(h, struct box, node);
             n->loc.x = b->loc.x;
-            n->loc.w = b->loc.w;
+            n->loc.w = min(b->loc.w, n->dw);
         } break;
     case SBOX_HALIGN_CENTER:
         list_foreach(h, &b->lnks) {
             struct box *n = list_entry(h, struct box, node);
-            n->loc.x = max(b->loc.x,(b->loc.x + b->loc.w/2) - n->dw/2);
             n->loc.w = max((b->loc.x + b->loc.w) - n->loc.x, 0);
+            n->loc.w = min(b->loc.w, n->dw);
+            n->loc.x = max(b->loc.x, (b->loc.x + b->loc.w/2) - n->loc.w/2);
         } break;
     case SBOX_HALIGN_RIGHT:
         list_foreach(h, &b->lnks) {
             struct box *n = list_entry(h, struct box, node);
-            n->loc.x = max(b->loc.x, b->loc.x + b->loc.w - n->dw);
-            n->loc.w = min(n->dw, n->loc.w);
+            n->loc.w = min(n->dw, b->loc.w);
+            n->loc.x = max(b->loc.x, b->loc.x + b->loc.w - n->loc.w);
         } break;}
 
+    /* vertical alignment */
     switch (*sbx.valign) {
     case SBOX_VALIGN_TOP:
         list_foreach(h, &b->lnks) {
             struct box *n = list_entry(h, struct box, node);
             n->loc.y = b->loc.y;
-            n->loc.h = b->loc.h;
+            n->loc.h = min(n->dh, b->loc.h);
         } break;
     case SBOX_VALIGN_CENTER:
         list_foreach(h, &b->lnks) {
@@ -3087,26 +3227,15 @@ sbox_layout(struct box *b)
             n->loc.y = max(b->loc.y,b->loc.y + b->loc.h - n->dh);
             n->loc.h = min(n->dh, n->loc.h);
         } break;}
-}
-api struct sbox
-sbox_begin(struct state *s)
-{
-    struct sbox sbx;
-    widget_begin(s, WIDGET_SBOX);
-    sbx.valign = widget_push_param_int(s, SBOX_VALIGN_TOP);
-    sbx.halign = widget_push_param_int(s, SBOX_HALIGN_LEFT);
-    sbx.pad = widget_push_param_int(s, 4);
-    sbx.id = widget_box_push(s, BOX_INTERACTIVE);
-    sbx.content = widget_box_push(s, BOX_INTERACTIVE);
-    widget_push_param_id(s, sbx.content);
-    return sbx;
-}
-api void
-sbox_end(struct state *s)
-{
-    widget_box_pop(s);
-    widget_box_pop(s);
-    widget_end(s);
+
+    /* reshape sbox after content */
+    list_foreach(h, &b->lnks) {
+        struct box *n = list_entry(h, struct box, node);
+        b->loc.x = max(b->loc.x, n->loc.x);
+        b->loc.y = max(b->loc.y, n->loc.y);
+        b->loc.w = min(b->loc.w, n->loc.w);
+        b->loc.h = min(b->loc.h, n->loc.h);
+    } box_pad(p, b, -*sbx.padx, -*sbx.pady);
 }
 /* ---------------------------------------------------------------------------
  *                                  FLEX BOX
@@ -3129,7 +3258,7 @@ struct flex_box {
     int *cnt;
 };
 api struct flex_box
-flex_box(struct box *b)
+flex_box_ref(struct box *b)
 {
     struct flex_box fbx;
     union param *p = b->params;
@@ -3199,9 +3328,9 @@ api void
 flex_box_blueprint(struct box *b)
 {
     int i = 0;
-    struct flex_box fbx = flex_box(b);
+    struct flex_box fbx = flex_box_ref(b);
     union param *p = b->params + 5;
-    if (b->id != fbx.id) {box_blueprint(b, 0); return;}
+    if (b->id != fbx.id) {box_blueprint(b, 0, 0); return;}
 
     b->dw = b->dh = 0;
     for (i = 0; i < *fbx.cnt; ++i, p += 3) {
@@ -3254,7 +3383,7 @@ api void
 flex_box_layout(struct flex_box *f, struct box *b)
 {
     int i;
-    struct flex_box fbx = flex_box(b);
+    struct flex_box fbx = flex_box_ref(b);
     union param *p = b->params + 5;
     if (b->id != fbx.id)
         {box_layout(b, 0); return;}
@@ -3377,11 +3506,11 @@ flex_box_layout(struct flex_box *f, struct box *b)
 /* ---------------------------------------------------------------------------
  *                                  CLIP REGION
  * --------------------------------------------------------------------------- */
-api void
+api unsigned
 clip_region_begin(struct state *s)
 {
-    widget_begin(s, WIDGET_FLEX_BOX);
-    widget_box_push(s, BOX_INTERACTIVE);
+    widget_begin(s, WIDGET_CLIP_REGION);
+    return widget_box_push(s, BOX_INTERACTIVE);
 }
 api void
 clip_region_end(struct state *s)
@@ -3391,6 +3520,66 @@ clip_region_end(struct state *s)
     widget_push_param_id(s, id);
     widget_box_pop(s);
     widget_end(s);
+}
+/* ---------------------------------------------------------------------------
+ *                              SCROLL REGION
+ * --------------------------------------------------------------------------- */
+api unsigned
+scroll_region_begin(struct state *s)
+{
+    widget_begin(s, WIDGET_SCROLL_REGION);
+    return widget_box_push(s, BOX_INTERACTIVE);
+}
+api void
+scroll_region_end(struct state *s)
+{
+    clip_region_end(s);
+}
+api void
+scroll_region_input(struct box *b, const union event *evt)
+{
+    struct input *in = evt->hdr.input;
+    if (evt->hdr.origin == b) return;
+    if (evt->type != EVT_DRAGGED && (in->mouse.btn[MOUSE_BUTTON_MIDDLE].down ||
+        in->shortcuts[SHORTCUT_SCROLL_REGION_SCROLL].down)) {
+        b->tloc.x = -evt->dragged.x;
+        b->tloc.y = -evt->dragged.y;
+    } else if (in->shortcuts[SHORTCUT_SCROLL_REGION_RESET].down)
+        b->tloc.x = b->tloc.y = 0;
+}
+/* ---------------------------------------------------------------------------
+ *                              SCROLLED REGION
+ * --------------------------------------------------------------------------- */
+api unsigned
+scrolled_region_begin(struct state *s)
+{
+    widget_begin(s, WIDGET_SCROLLED_REGION);
+    return widget_box_push(s, BOX_INTERACTIVE);
+}
+api void
+scrolled_region_end(struct state *s)
+{
+    clip_region_end(s);
+}
+/* ---------------------------------------------------------------------------
+ *                                  PANEL
+ * --------------------------------------------------------------------------- */
+struct panel {
+    unsigned id;
+    unsigned end;
+};
+api struct panel
+panel_begin(struct state *s, unsigned id)
+{
+    struct panel pan = {0};
+    pushid(s, id);
+    widget_begin(s, WIDGET_PANEL);
+    return pan;
+}
+api void
+panel_end(struct state *s)
+{
+
 }
 
 /* ===========================================================================
@@ -3460,7 +3649,7 @@ api void
 nvgSlider(struct NVGcontext *vg, struct box *b)
 {
     NVGpaint bg, knob;
-    struct slider sld = slider(b);
+    struct slider sld = slider_ref(b);
     if (sld.cid == b->id) return;
 
     {struct box *p = b->parent;
@@ -3605,9 +3794,9 @@ ui_update(struct context *ctx)
         case PROC_FREE: free(p->mem.ptr); break;}
         process_end(p);
     }}
-    /* Process: Layouting */
+    /* Process: Input */
     {int i; union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_LAYOUTING))) {
+    while ((p = process_begin(ctx, PROCESS_INPUT))) {
         switch (p->type) {default:break;
         case PROC_BLUEPRINT: {
             struct process_layouting *op = &p->layout;
@@ -3615,7 +3804,7 @@ ui_update(struct context *ctx)
                 struct box *b = op->boxes[i];
                 switch (b->type) {
                 case WIDGET_ICON: icon_blueprint(b); break;
-                case WIDGET_BUTTON: box_blueprint(b, 0); break;
+                case WIDGET_BUTTON: box_blueprint(b, 0, 0); break;
                 case WIDGET_SLIDER: slider_blueprint(b); break;
                 case WIDGET_SBOX: sbox_blueprint(b); break;
                 default: blueprint(p, b); break;}
@@ -3640,23 +3829,22 @@ ui_update(struct context *ctx)
                 switch (b->type) {
                 default: transform(p, b); break;}
             }
+        } break;
+        case PROC_INPUT: {
+            struct list_hook *it = 0;
+            struct process_input *op = &p->input;
+            list_foreach(it, &op->evts) {
+                union event *evt = list_entry(it, union event, hdr.hook);
+                for (i = 0; i < evt->hdr.cnt; i++) {
+                    struct box *b = evt->hdr.boxes[i];
+                    switch (b->type) {
+                    case WIDGET_SLIDER: slider_input(b, evt); break;
+                    case WIDGET_SCROLL_REGION: scroll_region_input(b, evt); break;
+                    default: input(p, evt, b); break;}
+                }
+            }
         } break;}
         process_end(p);
-    }}
-    /* Process: Input */
-    {int i; union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_INPUT))) {
-        struct list_hook *it = 0;
-        struct process_input *op = &p->input;
-        list_foreach(it, &op->evts) {
-            union event *evt = list_entry(it, union event, hdr.hook);
-            for (i = 0; i < evt->hdr.cnt; i++) {
-                struct box *b = evt->hdr.boxes[i];
-                switch (b->type) {
-                case WIDGET_SLIDER: slider_input(b, evt); break;
-                default: input(p, evt, b); break;}
-            }
-        } process_end(p);
     }}
 }
 static void
@@ -3670,20 +3858,13 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
 
         for (i = 0; i < op->cnt; ++i) {
             struct box *b = op->boxes[i];
-#if 1
             switch (b->type) {
             case WIDGET_ICON: nvgIcon(vg, b); break;
             case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
             case WIDGET_SLIDER: nvgSlider(vg, b); break;
+            case WIDGET_SCROLL_REGION:
             case WIDGET_CLIP_REGION: nvgClipRegion(vg, b, &scissor);
             default: break;}
-#else
-            if (b == ctx->active)
-                nvgStrokeRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, nvgRGBA(255,0,0,255));
-            else if (b == ctx->hot)
-                nvgStrokeRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, nvgRGBA(0,255,0,255));
-            else nvgStrokeRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, nvgRGBA(255,255,255,255));
-#endif
         } nvgResetScissor(vg);
         process_end(p);
     }
@@ -3738,11 +3919,15 @@ ui_event(struct context *ctx, const SDL_Event *evt)
             input_button(ctx, MOUSE_BUTTON_LEFT, down);
         else if (evt->button.button == SDL_BUTTON_RIGHT)
             input_button(ctx, MOUSE_BUTTON_RIGHT, down);
+        else if (evt->button.button == SDL_BUTTON_MIDDLE)
+            input_button(ctx, MOUSE_BUTTON_MIDDLE, down);
     } break;
     case SDL_KEYUP:
     case SDL_KEYDOWN: {
         int down = (evt->type == SDL_KEYDOWN);
         SDL_Keycode sym = evt->key.keysym.sym;
+        if (sym == SDLK_BACKSPACE)
+            input_shortcut(ctx, SHORTCUT_SCROLL_REGION_RESET, down);
         input_key(ctx, sym, down);
     } break;}
 }
@@ -3783,18 +3968,23 @@ int main(void)
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
-            struct button btn = button_begin(s); {
-                struct sbox sbx = sbox_begin(s);
-                *sbx.halign = SBOX_HALIGN_CENTER;
-                *sbx.valign = SBOX_VALIGN_CENTER;
-                *sbx.pad = 8;
+            struct sbox sbx = sbox_begin(s); {
+            *sbx.padx = 50, *sbx.pady = 10;
+            *sbx.halign = SBOX_HALIGN_LEFT;
+            *sbx.valign = SBOX_VALIGN_TOP;
+                {struct button btn = button_begin(s);
+                sbx = sbox_begin(s);
+                    *sbx.halign = SBOX_HALIGN_CENTER;
+                    *sbx.valign = SBOX_VALIGN_CENTER;
+                    *sbx.padx = *sbx.pady = 8;
                     icon(s, ICON_TRIANGLE_DOWN);
                 sbox_end(s);
-            } button_end(s);
-            if (btn.clicked)
-                fprintf(stdout, "button clicked!\n");
-        } end(s);}
-
+                if (btn.clicked)
+                    fprintf(stdout, "button clicked!\n");
+                button_end(s);}
+            } sbox_end(s);
+            end(s);
+        }}
         /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
         glClearColor(0.10f, 0.18f, 0.24f, 1);
