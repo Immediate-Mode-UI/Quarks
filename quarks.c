@@ -4,9 +4,9 @@
  *
  * =========================================================================== */
 #include <assert.h> /* assert */
-#include <stdlib.h> /* malloc, free */
+#include <stdlib.h> /* calloc, free */
 #include <string.h> /* memcpy, memset */
-#include <stdint.h> /* uint64_t, uintptr_t */
+#include <stdint.h> /* uintptr_t */
 #include <limits.h> /* INT_MAX */
 #include <stdio.h> /* fprintf, fputc */
 
@@ -15,6 +15,7 @@
  * - Implement overlay box property for clipping regions
  * - Add serialization into memory functions
  * - One to one conversion from popup handling from last GUI
+ * - Implement scrollbar region
  */
 #undef min
 #undef max
@@ -117,11 +118,11 @@ struct input {
 
 /* parameter */
 union param {
+    unsigned id;
     int op;
     int type;
     int i;
     unsigned u;
-    unsigned id;
     unsigned flags;
     float f;
     void *p;
@@ -137,6 +138,7 @@ struct element {
     int depth;
     unsigned flags;
     unsigned params;
+    unsigned state;
 };
 struct component {
     unsigned version;
@@ -148,6 +150,10 @@ struct component {
     const unsigned *tbl_vals;
     const unsigned *tbl_keys;
     const int tblcnt;
+    const unsigned char *buf;
+    const int bufsiz;
+    const union param *params;
+    const int paramcnt;
 
     struct module *module;
     struct repository *repo;
@@ -625,13 +631,16 @@ static const struct element g_root_elements[] = {
     {WIDGET_BLOCKING,   5,  4,  WIDGET_BLOCKING,    5,BOX_INTERACTIVE|BOX_UNIFORM},
     {WIDGET_UI,         6,  5,  WIDGET_UI,          6,BOX_INTERACTIVE|BOX_UNIFORM},
 };
+static const unsigned char g_root_data[1];
+static union param g_root_params[1];
 static const unsigned g_root_table_keys[] = {0,1,2,3,4,5,6,0};
 static const unsigned g_root_table_vals[] = {0,1,2,3,4,5,6,0};
 static const struct component g_root = {
     VERSION, 0, 7, 0,
     g_root_elements, cntof(g_root_elements),
     g_root_table_vals, g_root_table_keys, 8,
-    NULL, 0, NULL, NULL
+    g_root_data, 0, g_root_params, 0,
+    0, 0, 0, 0
 };
 #define OPCODES(OP)\
     OP(BUF_BEGIN,       1,  "%u")\
@@ -1662,6 +1671,10 @@ load(struct context *ctx, unsigned id, const struct component *c)
     repo->tbl.cnt = c->tblcnt;
     repo->tbl.keys = cast(unsigned*, c->tbl_keys);
     repo->tbl.vals = cast(int*, c->tbl_vals);
+    repo->params = cast(union param*, c->params);
+    repo->buf = cast(char*, c->buf);
+    repo->argcnt = c->paramcnt;
+    repo->bufsiz = c->bufsiz;
 
     for (i = 0; i < c->elmcnt; ++i) {
         const struct element *e = c->elms + i;
@@ -1673,6 +1686,8 @@ load(struct context *ctx, unsigned id, const struct component *c)
         b->type = e->type;
         b->flags = e->flags;
         b->depth = e->depth;
+        b->params = repo->params + e->params;
+        b->buf = repo->buf + e->state;
         transform_init(&b->tloc);
         transform_init(&b->tscr);
 
@@ -1922,7 +1937,7 @@ process_begin(struct context *ctx, unsigned flags)
         operation_begin(p, PROC_ALLOC_FRAME, ctx, &ctx->arena);
 
         s->boxcnt++;
-        s->tblcnt = cast(int, cast(float, s->boxcnt) * 1.5f);
+        s->tblcnt = cast(int, cast(float, s->boxcnt) * 1.35f);
         s->tblcnt = npow2(s->tblcnt);
 
         /* calculate required memory */
@@ -2594,8 +2609,9 @@ process_begin(struct context *ctx, unsigned flags)
                     copy(buf+n, pi->name, pi->len);
                     n += pi->len;
                 } buf[n] = 0;
-            } fprintf(fp, "    {%d, %u, %u, %u, %d, %s},\n",
-                b->type, b->id, pid, b->wid, b->depth, buf);
+            } fprintf(fp, "    {%d, %u, %u, %u, %d, %s, %u, %u},\n",
+                b->type, b->id, pid, b->wid, b->depth, buf,
+                (unsigned)(b->params - r->params), (unsigned)(b->buf - r->buf));
         } fprintf(fp, "};\n");
         fprintf(fp, "const unsigned g_%s_tbl_keys[%d] = {\n    ",p->serial.str, r->tbl.cnt);
         for (i = 0; i < r->tbl.cnt; ++i) {
@@ -2609,17 +2625,32 @@ process_begin(struct context *ctx, unsigned flags)
             fprintf(fp, "%d", r->tbl.vals[i]);
             if (i < r->tbl.cnt-1) fputc(',', fp);
         } fprintf(fp, "\n};\n");
+        fprintf(fp, "union param g_%s_params[%d] = {\n    ", p->serial.str, r->argcnt);
+        for (i = 0; i < r->argcnt; ++i) {
+            if (i && !(i & 0x7)) fprintf(fp, "\n    ");
+            fprintf(fp, "{%uu}", r->params[i].u);
+            if (i < r->bufsiz-1) fputc(',', fp);
+        } fprintf(fp, "\n};\n");
+        fprintf(fp, "const unsigned char g_%s_data[%d] = {\n    ", p->serial.str, r->bufsiz);
+        for (i = 0; i < r->bufsiz; ++i) {
+            unsigned char c = cast(unsigned char,r->buf[i]);
+            if (i && !(i & 0x0F)) fprintf(fp, "\n    ");
+            fprintf(fp, "0x%x", c);
+            if (i < r->bufsiz-1) fputc(',', fp);
+        } fprintf(fp, "\n};\n");
         fprintf(fp, "struct box *g_%s_bfs[%d];\n", p->serial.str, r->boxcnt+1);
         fprintf(fp, "struct box g_%s_boxes[%d];\n", p->serial.str, r->boxcnt);
         fprintf(fp, "struct module g_%s_module;\n", p->serial.str);
         fprintf(fp, "struct repository g_%s_repository;\n", p->serial.str);
         fprintf(fp, "const struct component g_%s_component = {\n", p->serial.str);
-        fprintf(fp, "    %d, g_%s_elements,", VERSION, p->serial.str);
+        fprintf(fp, "    %d, g_%s_elements, ", VERSION, p->serial.str);
         fprintf(fp, "cntof(g_%s_elements),\n", p->serial.str);
         fprintf(fp, "    g_%s_tbl_vals, g_%s_tbl_keys", p->serial.str, p->serial.str);
         fprintf(fp, "cntof(g_%s_tbl), %d, %d, \n", p->serial.str, r->depth, r->tree_depth);
+        fprintf(fp, "    g_%s_data, cntof(g_%s_data), \n", p->serial.str, p->serial.str);
+        fprintf(fp, "    g_%s_params, cntof(g_%s_params), \n", p->serial.str, p->serial.str);
         fprintf(fp, "    g_%s_module, g_%s_repo", p->serial.str, p->serial.str);
-        fprintf(fp, "g_%s_boxes,\n    g_%s_bfs,", p->serial.str, p->serial.str);
+        fprintf(fp, "g_%s_boxes,\n    g_%s_bfs, ", p->serial.str, p->serial.str);
         fprintf(fp, "cntof(g_%s_boxes)\n", p->serial.str);
         fprintf(fp, "};\n");
 
@@ -3120,8 +3151,8 @@ slider_layout(struct box *b)
     int x = p->loc.x + cursor_size/2;
     int w = p->loc.w - cursor_size;
 
-    b->loc.h = cursor_size * 2;
     b->loc.w = cursor_size;
+    b->loc.h = cursor_size * 2;
     b->loc.x = x + roundi(w * cur_off) - cursor_size/2;
     b->loc.y = p->loc.y + p->loc.h/2 - b->loc.h/2;}
 }
