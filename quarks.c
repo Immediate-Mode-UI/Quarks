@@ -11,8 +11,6 @@
 #include <stdio.h> /* fprintf, fputc */
 
 /* TODO: Library
- * - Solve storing persistent state
- * - Solve string parameter
  * - Make reordering persistent over frames (zorder flag in box?)
  * - Implement overlay box property for clipping regions
  * - Add serialization into memory functions
@@ -47,16 +45,11 @@
 /* callbacks */
 typedef void(*dealloc_f)(void *usr, void *data, const char *file, int line);
 typedef void*(*alloc_f)(void *usr, int size, const char *file, int line);
-typedef void(*measure_f)(int *tw, int *th, void *usr, int font, int fh, const char *txt, int len);
+typedef int(*measure_f)(void *usr, int font, int fh, const char *txt, int len);
 struct allocator {
     void *usr;
     alloc_f alloc;
     dealloc_f dealloc;
-};
-struct canvas {
-    void *usr;
-    int font_default_height;
-    measure_f measure;
 };
 /* list */
 struct list_hook {
@@ -249,7 +242,7 @@ struct state {
     /* references */
     struct module *mod;
     struct context *ctx;
-    const struct canvas *can;
+    const struct config *cfg;
     struct repository *repo;
 
     /* stats */
@@ -478,9 +471,12 @@ enum widget_internal {
     WIDGET_CONTEXTUAL_PANEL,
     WIDGET_SLOT
 };
+struct config {
+    int font_default_height;
+};
 struct context {
     int state;
-    struct canvas can;
+    struct config cfg;
     struct input input;
     union process proc;
     unsigned unbalanced:1;
@@ -516,10 +512,9 @@ struct context {
     struct box *hot;
 };
 /* context */
-api struct context *create(const struct allocator *a, struct canvas c);
+api struct context *create(const struct allocator *a, int default_font_height);
 api void destroy(struct context *ctx);
-api void init(struct context *ctx, const struct allocator *a, struct canvas c);
-api struct canvas canvas(void *usr, int default_font_height, measure_f cb);
+api void init(struct context *ctx, const struct allocator *a, int default_font_height);
 
 /* process */
 api union process *process_begin(struct context *ctx, unsigned flags);
@@ -563,7 +558,7 @@ api float *widget_push_param_float(struct state *s, float f);
 api int *widget_push_param_int(struct state *s, int i);
 api unsigned *widget_push_param_uint(struct state *s, unsigned u);
 api unsigned *widget_push_param_id(struct state *s, unsigned id);
-api void widget_push_param_str(struct state *s, const char *str, int len);
+api const char* widget_push_param_str(struct state *s, const char *str, int len);
 
 /* param: pop */
 api float *widget_get_param_float(struct box *b, int idx);
@@ -1137,25 +1132,25 @@ op_add(struct state *s, const union param *p, int cnt)
         ob->ops[s->op_idx++] = p[i];
     return ob->ops + (s->op_idx - cnt);
 }
-intern int
+intern const char*
 store(struct state *s, const char *str, int len)
 {
-    int off = s->total_buf_size;
+    int off = 0;
     struct buffer *ob = s->buf;
     assert(len < MAX_STR_BUF-1);
-
     if ((s->buf_off + len) > MAX_STR_BUF-1) {
         struct buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
-        s->buf_off = off = 0;
+        s->buf_off = 0;
         ob->next = b;
         s->buf = ob = b;
-    } copy(ob->buf + off, str, len);
+    } copy(ob->buf + s->buf_off, str, len);
 
-    ob->buf[off + len] = 0;
+    off = s->buf_off;
+    ob->buf[s->buf_off + len] = 0;
     s->total_buf_size += len + 1;
     s->buf_off += len + 1;
-    return off;
+    return ob->buf + off;
 }
 api void
 pushid(struct state *s, unsigned id)
@@ -1232,10 +1227,10 @@ module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
     /* setup state */
     s->id = id;
     s->ctx = ctx;
-    s->can = &ctx->can;
+    s->cfg = &ctx->cfg;
     s->arena.mem = &ctx->blkmem;
     s->param_list = s->opbuf = arena_push(&s->arena, 1, szof(struct param_buffer), 0);
-    s->buf_list = s->buf = arena_push(&s->arena, 1, szof(struct param_buffer), 0);
+    s->buf_list = s->buf = arena_push(&s->arena, 1, szof(struct buffer), 0);
     s->mod = module_find(ctx, id);
     s->repo = !s->mod ? 0: s->mod->repo[s->mod->repoid];
     list_init(&s->hook);
@@ -1433,7 +1428,6 @@ widget_push_param_uint(struct state *s, unsigned u)
     {union param p[2], *q;
     p[0].op = OP_PUSH_UINT;
     p[1].u = u;
-    widget_push_param(s, p);
     q = widget_push_param(s, p);
     return &q[1].u;}
 }
@@ -1445,20 +1439,19 @@ widget_push_param_id(struct state *s, unsigned id)
     {union param p[2], *q;
     p[0].op = OP_PUSH_ID;
     p[1].id = id;
-    widget_push_param(s, p);
     q = widget_push_param(s, p);
     return &q[1].id;}
 }
-api void
+api const char*
 widget_push_param_str(struct state *s, const char *str, int len)
 {
     assert(s);
-    if (!s) return;
+    if (!s) return 0;
     {union param p[2];
     p[0].op = OP_PUSH_STR;
     p[1].i = len + 1;
     widget_push_param(s, p);}
-    store(s, str, len);
+    return store(s, str, len);
 }
 api float*
 widget_push_modifier_float(struct state *s, float *f)
@@ -2071,6 +2064,7 @@ process_begin(struct context *ctx, unsigned flags)
                 assert(gtop > 0); gtop--; break;
 
             /* -------------------------- Parameter ------------------------- */
+            case OP_PUSH_STR:
             case OP_PUSH_FLOAT:
             case OP_PUSH_INT:
             case OP_PUSH_UINT:
@@ -2783,14 +2777,14 @@ input(union process *op, union event *evt, struct box *b)
     } break;}
 }
 api void
-init(struct context *ctx, const struct allocator *a, struct canvas can)
+init(struct context *ctx, const struct allocator *a, int font_default_height)
 {
     assert(ctx);
     if (!ctx) return;
     memset(ctx, 0, sizeof(*ctx));
     a = (a) ? a: &default_allocator;
     zero(ctx, szof(*ctx));
-    ctx->can = can;
+    ctx->cfg.font_default_height = font_default_height;
 
     /* setup allocators */
     ctx->mem = *a;
@@ -2828,22 +2822,13 @@ init(struct context *ctx, const struct allocator *a, struct canvas can)
     ctx->origin = ctx->boxes;
     ctx->hot = ctx->boxes;
 }
-api struct canvas
-canvas(void *usr, int fh, measure_f f)
-{
-    struct canvas c;
-    c.usr = usr;
-    c.measure = f;
-    c.font_default_height = fh;
-    return c;
-}
 api struct context*
-create(const struct allocator *a, struct canvas c)
+create(const struct allocator *a, int font_default_height)
 {
     struct context *ctx = 0;
     a = (a) ? a: &default_allocator;
     ctx = qalloc(a, szof(*ctx));
-    init(ctx, a, c);
+    init(ctx, a, font_default_height);
     return ctx;
 }
 api void
@@ -2969,9 +2954,9 @@ input_rune(struct context *ctx, unsigned long r)
  * =========================================================================== */
 enum widget_type {
     /* Widgets */
-    WIDGET_SYMBOL,
     WIDGET_LABEL,
     WIDGET_BUTTON,
+    WIDGET_BUTTON_LABEL,
     WIDGET_SLIDER,
     WIDGET_SCROLL,
     /* Layouting */
@@ -2991,65 +2976,42 @@ enum widget_shortcuts {
 };
 
 /* ---------------------------------------------------------------------------
- *                                  ICON
- * --------------------------------------------------------------------------- */
-enum symbol_symbol {
-    SYM_CIRCLE_SOLID,
-    SYM_CIRCLE_OUTLINE,
-    SYM_RECT_SOLID,
-    SYM_RECT_OUTLINE,
-    SYM_TRIANGLE_UP,
-    SYM_TRIANGLE_DOWN,
-    SYM_TRIANGLE_LEFT,
-    SYM_TRIANGLE_RIGHT,
-    SYM_COUNT
-};
-api unsigned
-symbol(struct state *s, enum symbol_symbol sym)
-{
-    unsigned id = 0;
-    widget_begin(s, WIDGET_SYMBOL);
-    widget_push_param_int(s, sym);
-    id = widget_box(s, BOX_INTERACTIVE);
-    widget_end(s);
-    return id;
-}
-api void
-symbol_blueprint(struct box *b)
-{
-    static const symbol_size = 16;
-    b->dw = symbol_size;
-    b->dh = symbol_size;
-}
-api void
-symbol_layout(struct box *b)
-{
-    if (b->loc.w > b->loc.h) {
-        b->loc.x += (b->loc.w - b->loc.h) / 2;
-        b->loc.w = b->loc.h;
-    } else if (b->loc.h > b->loc.w) {
-        b->loc.y += (b->loc.h - b->loc.w) / 2;
-        b->loc.h = b->loc.w;
-    }
-}
-/* ---------------------------------------------------------------------------
  *                                  LABEL
  * --------------------------------------------------------------------------- */
 struct label {
+    const char *txt;
     int *font;
-    int *h;
+    int *height;
 };
+api struct label
+label_ref(struct box *b)
+{
+    struct label lbl;
+    lbl.height = widget_get_param_int(b, 0);
+    lbl.font = widget_get_param_int(b, 1);
+    lbl.txt = widget_get_param_str(b, 2);
+    return lbl;
+}
 api struct label
 label(struct state *s, const char *txt, int len)
 {
     struct label lbl = {0};
-    const struct canvas *can = s->can;
-    widget_begin(s, WIDGET_SLIDER);
+    const struct config *cfg = s->cfg;
+    widget_begin(s, WIDGET_LABEL);
     widget_box(s, BOX_INTERACTIVE);
-    lbl.h = widget_push_param_int(s, can->font_default_height);
+    lbl.height = widget_push_param_int(s, cfg->font_default_height);
     lbl.font = widget_push_param_int(s, 0);
+    lbl.txt = widget_push_param_str(s, txt, len);
     widget_end(s);
     return lbl;
+}
+api void
+label_blueprint(struct box *b, void *usr, measure_f measure)
+{
+    struct label lbl = label_ref(b);
+    int len = cast(int, strlen(lbl.txt));
+    b->dw = measure(usr, *lbl.font, *lbl.height, lbl.txt, len);
+    b->dh = *lbl.height;
 }
 
 /* ---------------------------------------------------------------------------
@@ -3312,8 +3274,8 @@ sbox_begin(struct state *s)
     widget_begin(s, WIDGET_SBOX);
     sbx.valign = widget_push_param_int(s, SBOX_VALIGN_TOP);
     sbx.halign = widget_push_param_int(s, SBOX_HALIGN_LEFT);
-    sbx.padx = widget_push_param_int(s, 4);
-    sbx.pady = widget_push_param_int(s, 4);
+    sbx.padx = widget_push_param_int(s, 6);
+    sbx.pady = widget_push_param_int(s, 6);
     sbx.id = widget_box_push(s, BOX_INTERACTIVE);
     sbx.content = widget_box_push(s, BOX_INTERACTIVE);
     widget_push_param_id(s, sbx.content);
@@ -3387,13 +3349,18 @@ sbox_layout(struct box *b)
         } break;}
 
     /* reshape sbox after content */
+    {int x = b->loc.x + b->loc.w;
+    int y = b->loc.y + b->loc.h;
     list_foreach(h, &b->lnks) {
         struct box *n = list_entry(h, struct box, node);
         b->loc.x = max(b->loc.x, n->loc.x);
         b->loc.y = max(b->loc.y, n->loc.y);
-        b->loc.w = min(b->loc.w, n->loc.w);
-        b->loc.h = min(b->loc.h, n->loc.h);
-    } box_pad(p, b, -*sbx.padx, -*sbx.pady);
+        x = min(x, n->loc.x + n->loc.w);
+        y = min(y, n->loc.y + n->loc.h);
+    }
+    b->loc.w = x - b->loc.x;
+    b->loc.h = y = b->loc.y;
+    box_pad(p, b, -*sbx.padx, -*sbx.pady);}
 }
 /* ---------------------------------------------------------------------------
  *                                  FLEX BOX
@@ -3427,7 +3394,7 @@ flex_box_ref(struct box *b)
     return fbx;
 }
 api struct flex_box
-flex_box_begin(struct state *s, int cnt)
+flex_box_begin(struct state *s)
 {
     struct flex_box fbx;
     widget_begin(s, WIDGET_FLEX_BOX);
@@ -3435,7 +3402,7 @@ flex_box_begin(struct state *s, int cnt)
     widget_push_param_id(s, fbx.id);
     fbx.orientation = widget_push_param_int(s, FLEX_BOX_HORIZONTAL);
     fbx.padding = widget_push_param_int(s, 4);
-    fbx.spacing = widget_push_param_int(s, 8);
+    fbx.spacing = widget_push_param_int(s, 2);
     fbx.cnt = widget_push_param_int(s, 0);
     return fbx;
 }
@@ -3443,13 +3410,14 @@ intern void
 flex_box_slot(struct state *s, struct flex_box *fbx,
     enum flex_box_slot_type type, int value)
 {
-    int idx = *fbx->cnt++;
+    int idx = *fbx->cnt;
     unsigned id = 0;
     if (idx) widget_box_pop(s);
     id = widget_box_push(s, BOX_INTERACTIVE);
     widget_push_param_int(s, type);
     widget_push_param_int(s, value);
     widget_push_param_id(s, id);
+    *fbx->cnt = *fbx->cnt + 1;
 }
 api void
 flex_box_slot_dyn(struct state *s, struct flex_box *fbx)
@@ -3463,13 +3431,13 @@ flex_box_slot_static(struct state *s,
     flex_box_slot(s, fbx, FLEX_BOX_SLOT_STATIC, pixel_width);
 }
 api void
-flex_box_slot_variable_begin(struct state *s,
+flex_box_slot_variable(struct state *s,
     struct flex_box *fbx, int min_pixel_width)
 {
     flex_box_slot(s, fbx, FLEX_BOX_SLOT_VARIABLE, min_pixel_width);
 }
 api void
-flex_box_slot_fitting_begin(struct state *s, struct flex_box *fbx)
+flex_box_slot_fitting(struct state *s, struct flex_box *fbx)
 {
     flex_box_slot(s, fbx, FLEX_BOX_SLOT_FITTING, 0);
 }
@@ -3536,7 +3504,7 @@ flex_box_blueprint(struct box *b)
     case FLEX_BOX_VERTICAL: b->dh += pad; break;}}
 }
 api void
-flex_box_layout(struct flex_box *f, struct box *b)
+flex_box_layout(struct box *b)
 {
     int i = 0, p = 0;
     struct flex_box fbx = flex_box_ref(b);
@@ -3547,14 +3515,30 @@ flex_box_layout(struct flex_box *f, struct box *b)
     {int pos = 0, space = 0;
     int varcnt = 0, staticsz = 0, fixsz = 0, maxvar = 0;
     int dynsz = 0, varsz = 0, var = 0, dyncnt = 0;
-    if (f->orientation == FLEX_BOX_HORIZONTAL)
-        space = max(b->loc.w - (*f->cnt-1)**fbx.spacing, 0);
-    else space = max(b->loc.h - (*f->cnt-1)**fbx.spacing, 0);
-    space = max(0, space - 2**f->padding);
+
+    if (*fbx.orientation == FLEX_BOX_HORIZONTAL) {
+        int h = 0;
+        struct list_hook *it = 0;
+        list_foreach(it, &b->lnks) {
+            /* bound flex box height to maximum desired child height */
+            struct box *sb = list_entry(it, struct box, node);
+            h = max(h, sb->dh + 2* *fbx.padding);
+        } b->loc.h = min(h, b->loc.h);
+        space = max(b->loc.w - (*fbx.cnt-1)**fbx.spacing, 0);
+    } else {
+        int w = 0;
+        struct list_hook *it = 0;
+        list_foreach(it, &b->lnks) {
+            /* bound flex box width to maximum desired child width */
+            struct box *sb = list_entry(it, struct box, node);
+            w = max(w, sb->dw + 2* *fbx.padding);
+        } b->loc.w = min(w, b->loc.w);
+        space = max(b->loc.h - (*fbx.cnt-1)**fbx.spacing, 0);
+    } space = max(0, space - 2**fbx.padding);
 
     for (i = 0, p = 5; i < *fbx.cnt; ++i, p += 3) {
         int slot_typ = *widget_get_param_int(b, p + 0);
-        int slot_pix = *widget_get_param_int(b, p + 1);
+        int *slot_pix = widget_get_param_int(b, p + 1);
         unsigned slot_id = *widget_get_param_id(b, p + 2);
 
         /* find child box for id */
@@ -3565,27 +3549,27 @@ flex_box_layout(struct flex_box *f, struct box *b)
             if (sb->id == slot_id) break;
         } assert(sb);
 
-        if (f->orientation == FLEX_BOX_HORIZONTAL) {
-            sb->loc.y = b->loc.y + *f->padding;
-            sb->loc.h = max(0,b->loc.h - 2**f->padding);
+        if (*fbx.orientation == FLEX_BOX_HORIZONTAL) {
+            sb->loc.y = b->loc.y + *fbx.padding;
+            sb->loc.h = max(0, b->loc.h - 2* *fbx.padding);
         } else {
-            sb->loc.x = b->loc.x + *f->padding;
-            sb->loc.w = max(0,b->loc.w - 2**f->padding);
+            sb->loc.x = b->loc.x + *fbx.padding;
+            sb->loc.w = max(0, b->loc.w - 2**fbx.padding);
         }
         switch (slot_typ) {
         case FLEX_BOX_SLOT_DYNAMIC: {
             varcnt++, dyncnt++;
         } break;
         case FLEX_BOX_SLOT_FITTING:
-            if (f->orientation == FLEX_BOX_HORIZONTAL)
-                slot_pix = max(slot_pix, sb->dw);
-            else slot_pix = max(slot_pix, sb->dh);
+            if (*fbx.orientation == FLEX_BOX_HORIZONTAL)
+                *slot_pix = max(*slot_pix, sb->dw);
+            else *slot_pix = max(*slot_pix, sb->dh);
         case FLEX_BOX_SLOT_STATIC: {
-            staticsz += slot_pix;
+            staticsz += *slot_pix;
         } break;
         case FLEX_BOX_SLOT_VARIABLE: {
-            fixsz += slot_pix;
-            maxvar = max(slot_pix, maxvar);
+            fixsz += *slot_pix;
+            maxvar = max(*slot_pix, maxvar);
             varcnt++;
         } break;}
     }
@@ -3613,7 +3597,7 @@ flex_box_layout(struct flex_box *f, struct box *b)
         } else var = dynsz / max(varcnt+dyncnt,1);
     } else var = 0;
 
-    /* set position and width */
+    /* set position and size */
     switch (*fbx.orientation) {
     case FLEX_BOX_HORIZONTAL: pos = b->loc.x + *fbx.padding; break;
     case FLEX_BOX_VERTICAL: pos = b->loc.y + *fbx.padding; break;}
@@ -3653,6 +3637,7 @@ flex_box_layout(struct flex_box *f, struct box *b)
             } pos += sb->loc.h + *fbx.spacing;
         } break;}
     }}
+
 }
 /* ---------------------------------------------------------------------------
  *                                  CLIP REGION
@@ -3712,6 +3697,40 @@ scrolled_region_end(struct state *s)
 {
     clip_region_end(s);
 }
+/* ---------------------------------------------------------------------------
+ *                              BUTTON_LABEL
+ * --------------------------------------------------------------------------- */
+struct button_label {
+    unsigned id;
+    struct label lbl;
+    struct sbox sbx;
+    struct button btn;
+};
+api struct button_label
+button_label(struct state *s, const char *txt, int len)
+{
+    struct button_label btn;
+    widget_begin(s, WIDGET_BUTTON_LABEL);
+    widget_box_push(s, BOX_INTERACTIVE);
+    btn.btn = button_begin(s);
+        btn.sbx = sbox_begin(s);
+        *btn.sbx.halign = SBOX_HALIGN_CENTER;
+        *btn.sbx.valign = SBOX_VALIGN_CENTER;
+            btn.lbl = label(s, txt, len);
+        sbox_end(s);
+    button_end(s);
+    widget_box_pop(s);
+    widget_end(s);
+    return btn;
+}
+api int
+button_label_clicked(struct state *s, const char *label, int len)
+{
+    struct button_label btn;
+    btn = button_label(s, label, len);
+    return btn.btn.clicked != 0;
+}
+
 /* ===========================================================================
  *
  *                                  APP
@@ -3748,6 +3767,27 @@ intern int
 is_black(NVGcolor col)
 {
     return col.r == 0.0f && col.g == 0.0f && col.b == 0.0f && col.a == 0.0f;
+}
+api int
+nvgTextMeasure(void *usr, int font,
+    int fh, const char *txt, int len)
+{
+    float bounds[4];
+    struct NVGcontext *vg = usr;
+    nvgFontFaceId(vg, font);
+    nvgFontSize(vg, fh);
+    nvgTextBounds(vg, 0,0, txt, txt + len, bounds);
+    return cast(int, bounds[2]);
+}
+api void
+nvgLabel(struct NVGcontext *vg, struct box *b)
+{
+    struct label lbl = label_ref(b);
+    nvgFontFaceId(vg, *lbl.font);
+    nvgFontSize(vg, *lbl.height);
+    nvgTextAlign(vg, NVG_ALIGN_LEFT|NVG_ALIGN_TOP);
+    nvgFillColor(vg, nvgRGBA(190,190,190,255));
+    nvgText(vg, b->scr.x, b->scr.y, lbl.txt, NULL);
 }
 api void
 nvgButton(struct NVGcontext *vg, struct box *b, NVGcolor col)
@@ -3821,60 +3861,6 @@ nvgSlider(struct NVGcontext *vg, struct box *b)
     nvgRestore(vg);}
 }
 api void
-nvgIcon(struct NVGcontext *vg, struct box *b)
-{
-    int sym = b->params[0].i;
-    nvgBeginPath(vg);
-    nvgFillColor(vg, nvgRGBA(190,190,190,255));
-
-    switch (sym) {
-    default: assert(0); break;
-    case SYM_CIRCLE_SOLID:
-    case SYM_CIRCLE_OUTLINE: {
-        float cx = b->scr.x + b->scr.w;
-        float cy = b->scr.y +(int)(b->scr.h*0.5f);
-        float kr = b->scr.h / 2;
-
-        nvgCircle(vg, cx,cy, kr);
-        if (sym == SYM_CIRCLE_SOLID) nvgFill(vg);
-        else nvgStroke(vg);
-    } break;
-    case SYM_RECT_SOLID:
-    case SYM_RECT_OUTLINE: {
-        nvgRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h);
-        if (sym == SYM_RECT_SOLID) nvgFill(vg);
-        else nvgStroke(vg);
-    } break;
-    case SYM_TRIANGLE_UP: {
-        nvgMoveTo(vg, b->scr.x + b->scr.w*0.5f, b->scr.y);
-        nvgLineTo(vg, b->scr.x, b->scr.y + b->scr.h);
-        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h);
-        nvgClosePath(vg);
-        nvgFill(vg);
-    } break;
-    case SYM_TRIANGLE_DOWN: {
-        nvgMoveTo(vg, b->scr.x, b->scr.y);
-        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y);
-        nvgLineTo(vg, b->scr.x + b->scr.w*0.5f, b->scr.y + b->scr.h);
-        nvgClosePath(vg);
-        nvgFill(vg);
-    } break;
-    case SYM_TRIANGLE_LEFT: {
-        nvgMoveTo(vg, b->scr.x, b->scr.y + b->scr.h * 0.5f);
-        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y);
-        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h);
-        nvgClosePath(vg);
-        nvgFill(vg);
-    } break;
-    case SYM_TRIANGLE_RIGHT: {
-        nvgMoveTo(vg, b->scr.x, b->scr.y);
-        nvgLineTo(vg, b->scr.x + b->scr.w, b->scr.y + b->scr.h * 0.5f);
-        nvgLineTo(vg, b->scr.x, b->scr.y + b->scr.h);
-        nvgClosePath(vg);
-        nvgFill(vg);
-    } break;};
-}
-api void
 nvgClipRegion(struct NVGcontext *vg, struct box *b, struct rect *sis)
 {
     union param *p = b->params;
@@ -3908,23 +3894,11 @@ nvgStrokeRect(struct NVGcontext *vg, int x, int y, int w, int h, NVGcolor col)
     nvgRect(vg, x+1, y+1, w-2, h-2);
     nvgStroke(vg);
 }
-api void
-nvgTextMeasure(int *tw, int *th, void *usr, int font,
-    int fh, const char *txt, int len)
-{
-    float bounds[4];
-    struct NVGcontext *vg = usr;
-    nvgFontFaceId(vg, font);
-    nvgFontSize(vg, fh);
-    nvgTextBounds(vg, 0,0, txt, txt + len, bounds);
-    *tw = cast(int, bounds[2]);
-    *th = cast(int, bounds[3]);
-}
 /* ---------------------------------------------------------------------------
  *                                  PLATFORM
  * --------------------------------------------------------------------------- */
 static void
-ui_update(struct context *ctx)
+ui_update(struct NVGcontext *vg, struct context *ctx)
 {
     /* Process: Commit */
     {union process *p = 0;
@@ -3945,10 +3919,11 @@ ui_update(struct context *ctx)
             for (i = op->begin; i != op->end; i += op->inc) {
                 struct box *b = op->boxes[i];
                 switch (b->type) {
-                case WIDGET_SYMBOL: symbol_blueprint(b); break;
+                case WIDGET_LABEL: label_blueprint(b, vg, nvgTextMeasure); break;
                 case WIDGET_BUTTON: box_blueprint(b, 0, 0); break;
                 case WIDGET_SLIDER: slider_blueprint(b); break;
                 case WIDGET_SBOX: sbox_blueprint(b); break;
+                case WIDGET_FLEX_BOX: flex_box_blueprint(b); break;
                 default: blueprint(p, b); break;}
             }
         } break;
@@ -3957,10 +3932,10 @@ ui_update(struct context *ctx)
             for (i = op->begin; i != op->end; i += op->inc) {
                 struct box *b = op->boxes[i];
                 switch (b->type) {
-                case WIDGET_SYMBOL: symbol_layout(b); break;
                 case WIDGET_BUTTON: box_layout(b, 0); break;
                 case WIDGET_SLIDER: slider_layout(b); break;
                 case WIDGET_SBOX: sbox_layout(b); break;
+                case WIDGET_FLEX_BOX: flex_box_layout(b); break;
                 default: layout(p, b); break;}
             }
         } break;
@@ -3997,11 +3972,10 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
         struct process_paint *op = &p->paint;
         struct rect scissor = {0,0,0,0};
         scissor.w = w, scissor.h = h;
-
         for (i = 0; i < op->cnt; ++i) {
             struct box *b = op->boxes[i];
             switch (b->type) {
-            case WIDGET_SYMBOL: nvgIcon(vg, b); break;
+            case WIDGET_LABEL: nvgLabel(vg, b); break;
             case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
             case WIDGET_SLIDER: nvgSlider(vg, b); break;
             case WIDGET_SCROLL_REGION:
@@ -4080,7 +4054,6 @@ ui_event(struct context *ctx, const SDL_Event *evt)
  *
  * =========================================================================== */
 #include "icons.h"
-
 enum fonts {
     FONT_HL,
     FONT_ICONS,
@@ -4104,12 +4077,13 @@ int main(void)
         SDL_WINDOWPOS_CENTERED, 1000, 600, SDL_WINDOW_SHOWN|SDL_WINDOW_OPENGL);
     glContext = SDL_GL_CreateContext(win);
 
+    /* NanoVG */
     vg = nvgCreateGL2(NVG_ANTIALIAS);
     if (!vg) return -1;
     fnts[FONT_HL] = nvgCreateFont(vg, "HL", "half_life.ttf");
-    fnts[FONT_ICONS] = nvgCreateFont(vg, "HL", "icons.ttf");
+    fnts[FONT_ICONS] = nvgCreateFont(vg, "icons", "icons.ttf");
 
-    ctx = create(DEFAULT_ALLOCATOR, canvas(vg, 13, nvgTextMeasure));
+    ctx = create(DEFAULT_ALLOCATOR, 16);
     input_resize(ctx, 1000, 600);
     while (!quit) {
         SDL_Event evt;
@@ -4121,39 +4095,32 @@ int main(void)
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
-            struct sbox sbx = sbox_begin(s); {
-            *sbx.padx = 50, *sbx.pady = 10;
-                {struct button btn = button_begin(s);
-                sbx = sbox_begin(s);
+            struct flex_box fbx = flex_box_begin(s); {
+                /* label button */
+                flex_box_slot_fitting(s, &fbx);
+                if (button_label_clicked(s, txt("Label")))
+                    fprintf(stdout, "label button clicked!\n");
+                flex_box_slot_fitting(s, &fbx); {
+                    /* icon button (fontawesome) */
+                    struct button btn = button_begin(s);
+                    struct sbox sbx = sbox_begin(s);
                     *sbx.halign = SBOX_HALIGN_CENTER;
-                    *sbx.valign = SBOX_VALIGN_CENTER;
-                    *sbx.padx = *sbx.pady = 8;
-                    symbol(s, SYM_TRIANGLE_DOWN);
-                sbox_end(s);
-                if (btn.clicked)
-                    fprintf(stdout, "button clicked!\n");
-                button_end(s);}
-            } sbox_end(s);
-#if 0
-            sbx = sbox_begin(s); {
-            *sbx.padx = 20, *sbx.pady = 10;
-                button_begin(s);
-                sbx = sbox_begin(s); {
-                    *sbx.halign = SBOX_HALIGN_CENTER;
-                    *sbx.valign = SBOX_VALIGN_CENTER;
-                    *sbx.padx = *sbx.pady = 4;
-                        label(s, txt("Label"));
-                } sbox_end(s);
-                button_end(s);
-            } sbox_end(s);
-#endif
+                    *sbx.valign = SBOX_VALIGN_CENTER; {
+                        struct label lbl = label(s, txt(ICON_FA_CUBES));
+                        *lbl.font = fnts[FONT_ICONS];
+                    } sbox_end(s);
+                    if (btn.clicked)
+                        fprintf(stdout, "icon button clicked!\n");
+                    button_end(s);
+                }
+            } flex_box_end(s, &fbx);
             end(s);
         }}
         /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
         glClearColor(0.10f, 0.18f, 0.24f, 1);
         nvgBeginFrame(vg, 1000, 600, 1.0f);
-        ui_update(ctx);
+        ui_update(vg, ctx);
         ui_paint(vg, ctx, 1000, 600);
         nvgEndFrame(vg);
 
