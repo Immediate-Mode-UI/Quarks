@@ -14,6 +14,7 @@
  * - Make reordering persistent over frames (zorder flag in box?)
  * - Implement overlay box property for clipping regions
  * - Add serialization into memory functions
+ * - One to one conversion from popup handling from last GUI
  */
 #undef min
 #undef max
@@ -396,7 +397,6 @@ enum processes {
     PROCESS_BLUEPRINT = PROCESS_COMMIT|flag(PROC_BLUEPRINT),
     PROCESS_LAYOUT = PROCESS_BLUEPRINT|flag(PROC_LAYOUT),
     PROCESS_TRANSFORM = PROCESS_LAYOUT|flag(PROC_TRANSFORM),
-
     PROCESS_INPUT = PROCESS_TRANSFORM|flag(PROC_INPUT),
     PROCESS_PAINT = PROCESS_TRANSFORM|flag(PROC_PAINT),
     PROCESS_SERIALIZE = PROCESS_COMMIT|flag(PROC_SERIALIZE),
@@ -553,21 +553,21 @@ api unsigned widget_box_push(struct state *s, unsigned flags);
 api void widget_box_pop(struct state *s);
 api unsigned widget_box(struct state *s, unsigned flags);
 
-/* param: push */
+/* widget: push */
 api float *widget_push_param_float(struct state *s, float f);
 api int *widget_push_param_int(struct state *s, int i);
 api unsigned *widget_push_param_uint(struct state *s, unsigned u);
 api unsigned *widget_push_param_id(struct state *s, unsigned id);
 api const char* widget_push_param_str(struct state *s, const char *str, int len);
 
-/* param: pop */
+/* widget: pop */
 api float *widget_get_param_float(struct box *b, int idx);
 api int *widget_get_param_int(struct box *b, int idx);
 api unsigned *widget_get_param_uint(struct box *b, int indx);
 api unsigned *widget_get_param_id(struct box *b, int idx);
 api const char *widget_get_param_str(struct box *b, int idx);
 
-/* modifier: push */
+/* widget: modifier */
 api float* widget_push_modifier_float(struct state *s, float *f);
 api int* widget_push_modifier_int(struct state *s, int *i);
 api unsigned* widget_push_modifier_uint(struct state *s, unsigned *u);
@@ -1609,6 +1609,7 @@ dfs(struct box **buf, struct box **stk, struct box *root)
 api void
 call(struct context *ctx, unsigned id, const union param *op, int opcnt)
 {
+    int i = 0;
     static const int op_cnt[] = {
     #define OP(a,b,c) b,
         OPCODES(OP) 0
@@ -1620,12 +1621,11 @@ call(struct context *ctx, unsigned id, const union param *op, int opcnt)
 
     s = begin(ctx, id);
     s->op_idx = 0;
-    {int i = 0;
     for (i = 0; i < opcnt; ++i) {
         const int cnt = op_cnt[op[i].op];
         op_add(s, op + i, cnt + 1);
         i += cnt + 1;
-    } end(s);}
+    } end(s);
 }
 api void
 load(struct context *ctx, unsigned id, const struct component *c)
@@ -1968,7 +1968,7 @@ process_begin(struct context *ctx, unsigned flags)
         repo->bufsiz = s->total_buf_size;
         repo->boxcnt = 1;
 
-        /* setup module root box */
+        /* setup sub-tree root box */
         m->root = repo->boxes;
         m->root->flags = BOX_INTERACTIVE;
         m->root->type = WIDGET_TREE_ROOT;
@@ -3637,7 +3637,6 @@ flex_box_layout(struct box *b)
             } pos += sb->loc.h + *fbx.spacing;
         } break;}
     }}
-
 }
 /* ---------------------------------------------------------------------------
  *                                  CLIP REGION
@@ -3711,15 +3710,15 @@ button_label(struct state *s, const char *txt, int len)
 {
     struct button_label btn;
     widget_begin(s, WIDGET_BUTTON_LABEL);
-    widget_box_push(s, BOX_INTERACTIVE);
-    btn.btn = button_begin(s);
-        btn.sbx = sbox_begin(s);
-        *btn.sbx.halign = SBOX_HALIGN_CENTER;
-        *btn.sbx.valign = SBOX_VALIGN_CENTER;
-            btn.lbl = label(s, txt, len);
-        sbox_end(s);
-    button_end(s);
-    widget_box_pop(s);
+        widget_box_push(s, BOX_INTERACTIVE);
+        btn.btn = button_begin(s);
+            btn.sbx = sbox_begin(s);
+            *btn.sbx.halign = SBOX_HALIGN_CENTER;
+            *btn.sbx.valign = SBOX_VALIGN_CENTER;
+                btn.lbl = label(s, txt, len);
+            sbox_end(s);
+        button_end(s);
+        widget_box_pop(s);
     widget_end(s);
     return btn;
 }
@@ -3786,20 +3785,17 @@ nvgLabel(struct NVGcontext *vg, struct box *b)
     nvgFontFaceId(vg, *lbl.font);
     nvgFontSize(vg, *lbl.height);
     nvgTextAlign(vg, NVG_ALIGN_LEFT|NVG_ALIGN_TOP);
-    nvgFillColor(vg, nvgRGBA(190,190,190,255));
+    nvgFillColor(vg, nvgRGBA(220,220,220,255));
     nvgText(vg, b->scr.x, b->scr.y, lbl.txt, NULL);
 }
 api void
 nvgButton(struct NVGcontext *vg, struct box *b, NVGcolor col)
 {
-    NVGpaint bg;
-    NVGcolor src, dst;
-    const float corner_radius = 4.0f;
+    static const float corner_radius = 4.0f;
     const struct rect *r = &b->scr;
-
-    src = nvgRGBA(255,255,255, is_black(col) ? 16: 32);
-    dst = nvgRGBA(0,0,0, is_black(col) ? 16: 32);
-    bg = nvgLinearGradient(vg, r->x, r->y, r->x, r->y + r->h, src, dst);
+    NVGcolor src = nvgRGBA(255,255,255, is_black(col) ? 16: 32);
+    NVGcolor dst = nvgRGBA(0,0,0, is_black(col) ? 16: 32);
+    NVGpaint bg = nvgLinearGradient(vg, r->x, r->y, r->x, r->y + r->h, src, dst);
 
     nvgBeginPath(vg);
     nvgRoundedRect(vg, r->x+1,r->y+1, r->w-2,r->h-2, corner_radius-1);
@@ -3920,7 +3916,6 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
                 struct box *b = op->boxes[i];
                 switch (b->type) {
                 case WIDGET_LABEL: label_blueprint(b, vg, nvgTextMeasure); break;
-                case WIDGET_BUTTON: box_blueprint(b, 0, 0); break;
                 case WIDGET_SLIDER: slider_blueprint(b); break;
                 case WIDGET_SBOX: sbox_blueprint(b); break;
                 case WIDGET_FLEX_BOX: flex_box_blueprint(b); break;
@@ -3932,7 +3927,6 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
             for (i = op->begin; i != op->end; i += op->inc) {
                 struct box *b = op->boxes[i];
                 switch (b->type) {
-                case WIDGET_BUTTON: box_layout(b, 0); break;
                 case WIDGET_SLIDER: slider_layout(b); break;
                 case WIDGET_SBOX: sbox_layout(b); break;
                 case WIDGET_FLEX_BOX: flex_box_layout(b); break;
@@ -4106,7 +4100,7 @@ int main(void)
                     struct sbox sbx = sbox_begin(s);
                     *sbx.halign = SBOX_HALIGN_CENTER;
                     *sbx.valign = SBOX_VALIGN_CENTER; {
-                        struct label lbl = label(s, txt(ICON_FA_CUBES));
+                        struct label lbl = label(s, txt(ICON_FA_BAR_CHART));
                         *lbl.font = fnts[FONT_ICONS];
                     } sbox_end(s);
                     if (btn.clicked)
