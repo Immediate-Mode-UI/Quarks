@@ -15,7 +15,7 @@
  * - Implement overlay box property for clipping regions
  * - Add serialization into memory functions
  * - One to one conversion from popup handling from last GUI
- * - Implement scrollbar region
+ * - Implement scrolled region
  */
 #undef min
 #undef max
@@ -184,6 +184,7 @@ enum properties {
 #define PROP(p) BOX_ ## p = flag(BOX_ ## p ## _INDEX),
     PROPERTY_MAP(PROP)
 #undef PROP
+    BOX_MOVABLE = BOX_MOVABLE_X|BOX_MOVABLE_Y,
     PROPERTY_ALL
 };
 struct box {
@@ -265,7 +266,7 @@ struct state {
     struct param_buffer *opbuf;
     const struct component *tbl;
 
-    /* persistent state */
+    /* strings */
     int buf_off, total_buf_size;
     struct buffer *buf_list;
     struct buffer *buf;
@@ -300,8 +301,8 @@ struct repository {
 struct module {
     struct list_hook hook;
     unsigned id;
-    struct box *root;
     int repoid;
+    struct box *root;
     struct repository *repo[2];
 };
 
@@ -497,7 +498,6 @@ struct context {
     struct list_hook states;
     struct list_hook mod;
     struct list_hook garbage;
-    struct list_hook freelist;
 
     /* tree */
     struct module root;
@@ -558,6 +558,7 @@ api void widget_begin(struct state *s, int type);
 api unsigned widget_box_push(struct state *s, unsigned flags);
 api void widget_box_pop(struct state *s);
 api unsigned widget_box(struct state *s, unsigned flags);
+api void widget_end(struct state *s);
 
 /* widget: push */
 api float *widget_push_param_float(struct state *s, float f);
@@ -566,18 +567,20 @@ api unsigned *widget_push_param_uint(struct state *s, unsigned u);
 api unsigned *widget_push_param_id(struct state *s, unsigned id);
 api const char* widget_push_param_str(struct state *s, const char *str, int len);
 
-/* widget: pop */
-api float *widget_get_param_float(struct box *b, int idx);
-api int *widget_get_param_int(struct box *b, int idx);
-api unsigned *widget_get_param_uint(struct box *b, int indx);
-api unsigned *widget_get_param_id(struct box *b, int idx);
-api const char *widget_get_param_str(struct box *b, int idx);
-
-/* widget: modifier */
 api float* widget_push_modifier_float(struct state *s, float *f);
 api int* widget_push_modifier_int(struct state *s, int *i);
 api unsigned* widget_push_modifier_uint(struct state *s, unsigned *u);
-api void widget_end(struct state *s);
+
+api float* widget_push_state_float(struct state *s, float f);
+api int* widget_push_state_int(struct state *s, int i);
+api unsigned* widget_push_state_uint(struct state *s, unsigned u);
+
+/* widget: pop */
+api float *widget_get_float(struct box *b, int idx);
+api int *widget_get_int(struct box *b, int idx);
+api unsigned *widget_get_uint(struct box *b, int indx);
+api unsigned *widget_get_id(struct box *b, int idx);
+api const char *widget_get_str(struct box *b, int idx);
 
 /* box */
 api void box_shrink(struct box *d, const struct box *s, int pad);
@@ -1513,41 +1516,89 @@ widget_push_modifier_uint(struct state *s, unsigned *u)
             *u = act->params[*w.argc].u;
     } return widget_push_param_uint(s, *u);}
 }
+api float*
+widget_push_state_float(struct state *s, float f)
+{
+    const struct box *b;
+    struct widget w;
+
+    assert(s);
+    assert(s->ctx);
+    assert(s->wtop > 0);
+    if (!s || s->wtop < 1) return 0;
+
+    b = poll(s, s->lastid);
+    w = s->wstk[s->wtop-1];
+    if (!b) return widget_push_param_float(s, f);
+    return widget_push_param_float(s, b->params[*w.argc].f);
+}
+api int*
+widget_push_state_int(struct state *s, int i)
+{
+    const struct box *b;
+    struct widget w;
+
+    assert(s);
+    assert(s->ctx);
+    assert(s->wtop > 0);
+    if (!s || s->wtop < 1) return 0;
+
+    b = poll(s, s->lastid);
+    w = s->wstk[s->wtop-1];
+    if (!b) return widget_push_param_int(s, i);
+    return widget_push_param_int(s, b->params[*w.argc].i);
+}
+api unsigned*
+widget_push_state_uint(struct state *s, unsigned u)
+{
+    const struct box *b;
+    struct widget w;
+
+    assert(s);
+    assert(s->ctx);
+    assert(s->wtop > 0);
+    if (!s || s->wtop < 1) return 0;
+
+    b = poll(s, s->lastid);
+    w = s->wstk[s->wtop-1];
+    if (!b) return widget_push_param_uint(s, u);
+    return widget_push_param_uint(s, b->params[*w.argc].u);
+}
 intern union param*
 widget_get_param(struct box *b, int idx)
 {
     return b->params + idx;
 }
 api float*
-widget_get_param_float(struct box *b, int idx)
+widget_get_float(struct box *b, int idx)
 {
     union param *p = 0;
     p = widget_get_param(b, idx);
     return &p->f;
 }
 api int*
-widget_get_param_int(struct box *b, int idx)
+widget_get_int(struct box *b, int idx)
 {
     union param *p = 0;
     p = widget_get_param(b, idx);
     return &p->i;
 }
 api unsigned*
-widget_get_param_uint(struct box *b, int idx)
+widget_get_uint(struct box *b, int idx)
 {
     union param *p = 0;
     p = widget_get_param(b, idx);
     return &p->u;
 }
 api unsigned*
-widget_get_param_id(struct box *b, int idx)
+widget_get_id(struct box *b, int idx)
 {
     union param *p = 0;
     p = widget_get_param(b, idx);
     return &p->u;
 }
 api const char*
-widget_get_param_str(struct box *b, int idx)
+widget_get_str(struct box *b, int idx)
 {
     union param *p = 0;
     p = widget_get_param(b, idx);
@@ -1618,12 +1669,13 @@ dfs(struct box **buf, struct box **stk, struct box *root)
 api void
 call(struct context *ctx, unsigned id, const union param *op, int opcnt)
 {
-    int i = 0;
     static const int op_cnt[] = {
     #define OP(a,b,c) b,
         OPCODES(OP) 0
     #undef OP
-    }; struct state *s = 0;
+    }; int i = 0;
+
+    struct state *s = 0;
     assert(ctx);
     assert(op);
     if (!ctx || !op) return;
@@ -1654,6 +1706,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
     if (!c->bfs || !c->boxes || !c->tbl_keys || !c->tbl_vals)
         return;
 
+    /* setup module */
     m = c->module;
     zero(m, szof(*m));
     m->id = id;
@@ -1662,6 +1715,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
     list_init(&m->hook);
     list_add_tail(&ctx->mod, &m->hook);
 
+    /* setup repository */
     repo = c->repo;
     zero(repo, szof(*repo));
     repo->depth = c->depth;
@@ -1676,6 +1730,7 @@ load(struct context *ctx, unsigned id, const struct component *c)
     repo->argcnt = c->paramcnt;
     repo->bufsiz = c->bufsiz;
 
+    /* setup tree boxes */
     for (i = 0; i < c->elmcnt; ++i) {
         const struct element *e = c->elms + i;
         struct box *b = repo->boxes + lookup(&repo->tbl, e->id);
@@ -1985,6 +2040,8 @@ process_begin(struct context *ctx, unsigned flags)
 
         /* setup sub-tree root box */
         m->root = repo->boxes;
+        m->root->buf = repo->buf;
+        m->root->params = repo->params;
         m->root->flags = BOX_INTERACTIVE;
         m->root->type = WIDGET_TREE_ROOT;
         list_init(&m->root->node);
@@ -2649,7 +2706,7 @@ process_begin(struct context *ctx, unsigned flags)
         fprintf(fp, "cntof(g_%s_tbl), %d, %d, \n", p->serial.str, r->depth, r->tree_depth);
         fprintf(fp, "    g_%s_data, cntof(g_%s_data), \n", p->serial.str, p->serial.str);
         fprintf(fp, "    g_%s_params, cntof(g_%s_params), \n", p->serial.str, p->serial.str);
-        fprintf(fp, "    g_%s_module, g_%s_repo", p->serial.str, p->serial.str);
+        fprintf(fp, "    g_%s_module, g_%s_repo, ", p->serial.str, p->serial.str);
         fprintf(fp, "g_%s_boxes,\n    g_%s_bfs, ", p->serial.str, p->serial.str);
         fprintf(fp, "cntof(g_%s_boxes)\n", p->serial.str);
         fprintf(fp, "};\n");
@@ -2774,7 +2831,7 @@ layout(union process *op, struct box *b)
     } break;}
 }
 api void
-transform(union process *op, struct box *b)
+transform(union process *p, struct box *b)
 {
     struct list_hook *bi;
     struct transform *tb = &b->tscr;
@@ -2827,7 +2884,6 @@ init(struct context *ctx, const struct allocator *a, int font_default_height)
     list_init(&ctx->mod);
     list_init(&ctx->states);
     list_init(&ctx->garbage);
-    list_init(&ctx->freelist);
 
     /* setup root module */
     {struct component root;
@@ -2994,9 +3050,9 @@ enum widget_type {
     WIDGET_SBOX,
     WIDGET_FLEX_BOX,
     /* Regions */
-    WIDGET_CLIP_REGION,
+    WIDGET_CLIP_BOX,
     WIDGET_SCROLL_REGION,
-    WIDGET_SCROLLED_REGION,
+    WIDGET_SCROLL_BOX,
     WIDGET_PANEL,
     WIDGET_TYPE_COUNT
 };
@@ -3018,9 +3074,9 @@ api struct label
 label_ref(struct box *b)
 {
     struct label lbl;
-    lbl.height = widget_get_param_int(b, 0);
-    lbl.font = widget_get_param_int(b, 1);
-    lbl.txt = widget_get_param_str(b, 2);
+    lbl.height = widget_get_int(b, 0);
+    lbl.font = widget_get_int(b, 1);
+    lbl.txt = widget_get_str(b, 2);
     return lbl;
 }
 api struct label
@@ -3056,17 +3112,34 @@ struct button {
     unsigned entered:1;
     unsigned exited:1;
 };
-api int
-button_poll(struct state *s, struct button *btn)
+intern void
+button_pull(struct button *btn, const struct box *b)
 {
-    const struct box *b = poll(s, btn->id);
-    zero(btn, szof(*btn));
-    if (!b) return 0;
     btn->clicked = b->clicked;
     btn->pressed = b->pressed;
     btn->released = b->released;
     btn->entered = b->entered;
     btn->exited = b->exited;
+}
+api int
+button_poll(struct state *s, struct button *btn, unsigned id)
+{
+    const struct box *b = poll(s, id);
+    zero(btn, szof(*btn));
+    if (!b) return 0;
+    btn->id = id;
+    button_pull(btn, b);
+    return 1;
+}
+api int
+button_query(struct context *ctx, struct button *btn,
+    unsigned mid, unsigned id)
+{
+    const struct box *b = 0;
+    b = query(ctx, mid, id);
+    if (!b) return 0;
+    btn->id = id;
+    button_pull(btn, b);
     return 1;
 }
 api struct button
@@ -3076,7 +3149,7 @@ button_begin(struct state *s)
     zero(&btn, szof(btn));
     widget_begin(s, WIDGET_BUTTON);
     btn.id = widget_box_push(s, BOX_INTERACTIVE);
-    button_poll(s, &btn);
+    button_poll(s, &btn, btn.id);
     return btn;
 }
 api void
@@ -3100,11 +3173,11 @@ api struct slider
 slider_ref(struct box *b)
 {
     struct slider sld;
-    sld.min = widget_get_param_float(b, 0);
-    sld.value = widget_get_param_float(b, 1);
-    sld.max = widget_get_param_float(b, 2);
-    sld.max = widget_get_param_float(b, 3);
-    sld.cid = *widget_get_param_id(b, 4);
+    sld.min = widget_get_float(b, 0);
+    sld.value = widget_get_float(b, 1);
+    sld.max = widget_get_float(b, 2);
+    sld.cursor_size = widget_get_int(b, 3);
+    sld.cid = *widget_get_id(b, 4);
     return sld;
 }
 api struct slider
@@ -3115,7 +3188,7 @@ sliderf(struct state *s, float min, float *value, float max)
         sld.min = widget_push_param_float(s, min);
         sld.value = widget_push_modifier_float(s, value);
         sld.max = widget_push_param_float(s, max);
-        sld.cursor_size = widget_push_param_int(s, 8);
+        sld.cursor_size = widget_push_param_int(s, 10);
         sld.id = widget_box_push(s, BOX_INTERACTIVE);
             sld.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X);
             widget_push_param_id(s, sld.cid);
@@ -3192,16 +3265,17 @@ api struct scroll
 scroll_ref(struct box *b)
 {
     struct scroll scrl = {0};
-    scrl.total_x = widget_get_param_float(b, 0);
-    scrl.total_y = widget_get_param_float(b, 1);
-    scrl.size_x = widget_get_param_float(b, 2);
-    scrl.size_y = widget_get_param_float(b, 3);
-    scrl.off_x = widget_get_param_float(b, 4);
-    scrl.off_y = widget_get_param_float(b, 5);
+    scrl.total_x = widget_get_float(b, 0);
+    scrl.total_y = widget_get_float(b, 1);
+    scrl.size_x = widget_get_float(b, 2);
+    scrl.size_y = widget_get_float(b, 3);
+    scrl.off_x = widget_get_float(b, 4);
+    scrl.off_y = widget_get_float(b, 5);
+    scrl.cid = *widget_get_id(b, 6);
     return scrl;
 }
 api struct scroll
-scroll_begin(struct state *s)
+scroll_begin(struct state *s, float *off_x, float *off_y)
 {
     struct scroll scrl = {0};
     widget_begin(s, WIDGET_SCROLL);
@@ -3209,10 +3283,10 @@ scroll_begin(struct state *s)
     scrl.total_y = widget_push_param_float(s, 1);
     scrl.size_x = widget_push_param_float(s, 1);
     scrl.size_y = widget_push_param_float(s, 1);
-    scrl.off_x = widget_push_param_float(s, 0);
-    scrl.off_y = widget_push_param_float(s, 0);
+    scrl.off_x = widget_push_modifier_float(s, off_x);
+    scrl.off_y = widget_push_modifier_float(s, off_y);
     scrl.id = widget_box_push(s, BOX_INTERACTIVE);
-    scrl.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X|BOX_MOVABLE_Y);
+    scrl.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE);
     widget_push_param_id(s, scrl.cid);
     return scrl;
 }
@@ -3223,10 +3297,10 @@ scroll_end(struct state *s)
     widget_end(s);
 }
 api struct scroll
-scroll(struct state *s)
+scroll(struct state *s, float *off_x, float *off_y)
 {
     struct scroll scrl;
-    scrl = scroll_begin(s);
+    scrl = scroll_begin(s, off_x, off_y);
     scroll_end(s);
     return scrl;
 }
@@ -3235,18 +3309,17 @@ scroll_layout(struct box *b)
 {
     struct box *p = b->parent;
     struct scroll scrl = scroll_ref(b);
-    if (b->id != scrl.cid)
-        {box_layout(b, 0); return;}
+    if (b->id != scrl.cid) return;
 
     *scrl.total_x = max(*scrl.total_x, *scrl.size_x);
     *scrl.total_y = max(*scrl.total_y, *scrl.size_y);
     *scrl.off_x = clamp(0, *scrl.off_x, *scrl.total_x - *scrl.size_x);
     *scrl.off_y = clamp(0, *scrl.off_y, *scrl.total_y - *scrl.size_y);
 
-    b->scr.x = floori((float)p->scr.x + roundf(*scrl.off_x / *scrl.total_x) * (float)p->scr.w);
-    b->scr.y = floori((float)p->scr.y + roundf(*scrl.off_x / *scrl.total_y) * (float)p->scr.h);
-    b->scr.w = ceili((*scrl.size_x / *scrl.total_x) * (float)p->scr.w);
-    b->scr.h = ceili((*scrl.size_y / *scrl.total_y) * (float)p->scr.h);
+    b->loc.x = floori((float)p->loc.x + (*scrl.off_x / *scrl.total_x) * (float)p->loc.w);
+    b->loc.y = floori((float)p->loc.y + (*scrl.off_y / *scrl.total_y) * (float)p->loc.h);
+    b->loc.w = ceili((*scrl.size_x / *scrl.total_x) * (float)p->loc.w);
+    b->loc.h = ceili((*scrl.size_y / *scrl.total_y) * (float)p->loc.h);
 }
 api void
 scroll_input(struct box *b, const union event *evt)
@@ -3254,13 +3327,13 @@ scroll_input(struct box *b, const union event *evt)
     struct box *p = b->parent;
     struct scroll scrl = scroll_ref(b);
     if (b->id != scrl.cid) return;
-    if (evt->type != EVT_MOVED || evt->hdr.origin != b)
+    if (evt->type != EVT_MOVED)
         return;
 
-    {int scrl_x = b->scr.x - p->scr.x;
-    int scrl_y = b->scr.y - p->scr.y;
-    float scrl_rx = cast(float, scrl_x) / cast(float, p->scr.w);
-    float scrl_ry = cast(float, scrl_y) / cast(float, p->scr.h);
+    {int scrl_x = b->loc.x - p->loc.x;
+    int scrl_y = b->loc.y - p->loc.y;
+    float scrl_rx = cast(float, scrl_x) / cast(float, p->loc.w);
+    float scrl_ry = cast(float, scrl_y) / cast(float, p->loc.h);
     *scrl.off_x = clamp(0, scrl_rx * *scrl.total_x, *scrl.total_x - *scrl.size_x);
     *scrl.off_y = clamp(0, scrl_ry * *scrl.total_y, *scrl.total_y - *scrl.size_y);}
 }
@@ -3290,11 +3363,11 @@ api struct sbox
 sbox_ref(struct box *b)
 {
     struct sbox sbx;
-    sbx.valign = widget_get_param_int(b, 0);
-    sbx.halign = widget_get_param_int(b, 1);
-    sbx.padx = widget_get_param_int(b, 2);
-    sbx.pady = widget_get_param_int(b, 3);
-    sbx.content = *widget_get_param_id(b, 4);
+    sbx.valign = widget_get_int(b, 0);
+    sbx.halign = widget_get_int(b, 1);
+    sbx.padx = widget_get_int(b, 2);
+    sbx.pady = widget_get_int(b, 3);
+    sbx.content = *widget_get_id(b, 4);
     sbx.id = b->id;
     return sbx;
 }
@@ -3417,11 +3490,11 @@ api struct flex_box
 flex_box_ref(struct box *b)
 {
     struct flex_box fbx;
-    fbx.id = *widget_get_param_id(b, 0);
-    fbx.orientation = widget_get_param_int(b, 1);
-    fbx.padding = widget_get_param_int(b, 2);
-    fbx.spacing = widget_get_param_int(b, 3);
-    fbx.cnt = widget_get_param_int(b, 4);
+    fbx.id = *widget_get_id(b, 0);
+    fbx.orientation = widget_get_int(b, 1);
+    fbx.padding = widget_get_int(b, 2);
+    fbx.spacing = widget_get_int(b, 3);
+    fbx.cnt = widget_get_int(b, 4);
     return fbx;
 }
 api struct flex_box
@@ -3489,9 +3562,9 @@ flex_box_blueprint(struct box *b)
 
     b->dw = b->dh = 0;
     for (i = 0; i < *fbx.cnt; ++i, p += 3) {
-        int styp = *widget_get_param_int(b, p + 0);
-        int spix = *widget_get_param_int(b, p + 1);
-        unsigned sid = *widget_get_param_id(b, p + 2);
+        int styp = *widget_get_int(b, p + 0);
+        int spix = *widget_get_int(b, p + 1);
+        unsigned sid = *widget_get_id(b, p + 2);
 
         /* find child box for id */
         struct box *sb = 0;
@@ -3568,9 +3641,9 @@ flex_box_layout(struct box *b)
     } space = max(0, space - 2**fbx.padding);
 
     for (i = 0, p = 5; i < *fbx.cnt; ++i, p += 3) {
-        int slot_typ = *widget_get_param_int(b, p + 0);
-        int *slot_pix = widget_get_param_int(b, p + 1);
-        unsigned slot_id = *widget_get_param_id(b, p + 2);
+        int slot_typ = *widget_get_int(b, p + 0);
+        int *slot_pix = widget_get_int(b, p + 1);
+        unsigned slot_id = *widget_get_id(b, p + 2);
 
         /* find child box for id */
         struct box *sb = 0;
@@ -3612,8 +3685,8 @@ flex_box_layout(struct box *b)
             var = dynsz / max(varcnt,1);
             if (maxvar > var) {
                 for (i = 0, p = 5; i < *fbx.cnt; ++i, p += 3) {
-                    int slot_typ = *widget_get_param_int(b, p + 0);
-                    int slot_pix = *widget_get_param_int(b, p + 1);
+                    int slot_typ = *widget_get_int(b, p + 0);
+                    int slot_pix = *widget_get_int(b, p + 1);
                     if (slot_pix <= var) continue;
                     switch (slot_typ) {
                     case FLEX_BOX_SLOT_FITTING:
@@ -3633,9 +3706,9 @@ flex_box_layout(struct box *b)
     case FLEX_BOX_HORIZONTAL: pos = b->loc.x + *fbx.padding; break;
     case FLEX_BOX_VERTICAL: pos = b->loc.y + *fbx.padding; break;}
     for (i = 0, p = 5; i < *fbx.cnt; ++i, p += 3) {
-        int slot_typ = *widget_get_param_int(b, p + 0);
-        int slot_pix = *widget_get_param_int(b, p + 1);
-        unsigned slot_id = *widget_get_param_id(b, p + 2);
+        int slot_typ = *widget_get_int(b, p + 0);
+        int slot_pix = *widget_get_int(b, p + 1);
+        unsigned slot_id = *widget_get_id(b, p + 2);
 
         /* find child box for id */
         struct box *sb = 0;
@@ -3670,16 +3743,16 @@ flex_box_layout(struct box *b)
     }}
 }
 /* ---------------------------------------------------------------------------
- *                                  CLIP REGION
+ *                                  CLIP BOX
  * --------------------------------------------------------------------------- */
 api unsigned
-clip_region_begin(struct state *s)
+clip_box_begin(struct state *s)
 {
-    widget_begin(s, WIDGET_CLIP_REGION);
+    widget_begin(s, WIDGET_CLIP_BOX);
     return widget_box_push(s, BOX_INTERACTIVE);
 }
 api void
-clip_region_end(struct state *s)
+clip_box_end(struct state *s)
 {
     unsigned int id;
     id = widget_box(s, BOX_INTERACTIVE|BOX_OVERLAY);
@@ -3690,43 +3763,134 @@ clip_region_end(struct state *s)
 /* ---------------------------------------------------------------------------
  *                              SCROLL REGION
  * --------------------------------------------------------------------------- */
-api unsigned
+struct scroll_region {
+    unsigned id;
+    float *off_x;
+    float *off_y;
+};
+api struct scroll_region
+scroll_region_ref(struct box *b)
+{
+    struct scroll_region sr;
+    sr.off_x = widget_get_float(b, 0);
+    sr.off_y = widget_get_float(b, 1);
+    sr.id = *widget_get_id(b, 2);
+    return sr;
+}
+api struct scroll_region
 scroll_region_begin(struct state *s)
 {
+    struct scroll_region sr;
     widget_begin(s, WIDGET_SCROLL_REGION);
-    return widget_box_push(s, BOX_INTERACTIVE);
+    sr.off_x = widget_push_state_float(s, 0);
+    sr.off_y = widget_push_state_float(s, 0);
+    sr.id = widget_box_push(s, BOX_INTERACTIVE);
+    widget_push_param_id(s, sr.id);
+    return sr;
 }
 api void
 scroll_region_end(struct state *s)
 {
-    clip_region_end(s);
+    clip_box_end(s);
+}
+api void
+scroll_region_transform(struct box *b)
+{
+    struct scroll_region sr;
+    sr = scroll_region_ref(b);
+    if (b->id != sr.id)
+        {transform(0, b); return;}
+
+    {struct list_hook *bi;
+    struct transform *tb = &b->tscr;
+    tb->x -= *sr.off_x, tb->y -= *sr.off_y;
+    list_foreach(bi, &b->lnks) {
+        struct box *sub = list_entry(bi, struct box, node);
+        transform_concat(&sub->tscr, tb, &sub->tloc);
+        transform_rect(&sub->scr, &sub->loc, &sub->tscr);
+    }}
 }
 api void
 scroll_region_input(struct box *b, const union event *evt)
 {
     struct input *in = evt->hdr.input;
+    struct scroll_region sr = scroll_region_ref(b);
     if (evt->hdr.origin == b) return;
-    if (evt->type != EVT_DRAGGED && (in->mouse.btn[MOUSE_BUTTON_MIDDLE].down ||
-        in->shortcuts[SHORTCUT_SCROLL_REGION_SCROLL].down)) {
-        b->tloc.x = -evt->dragged.x;
-        b->tloc.y = -evt->dragged.y;
+    if (evt->type == EVT_DRAGGED && in->shortcuts[SHORTCUT_SCROLL_REGION_SCROLL].down) {
+        *sr.off_x += evt->moved.x;
+        *sr.off_y += evt->moved.y;
     } else if (in->shortcuts[SHORTCUT_SCROLL_REGION_RESET].down)
-        b->tloc.x = b->tloc.y = 0;
+        *sr.off_x = *sr.off_y = 0;
 }
 /* ---------------------------------------------------------------------------
- *                              SCROLLED REGION
+ *                              SCROLL BOX
  * --------------------------------------------------------------------------- */
 api unsigned
-scrolled_region_begin(struct state *s)
+scroll_box_begin(struct state *s)
 {
-    widget_begin(s, WIDGET_SCROLLED_REGION);
-    return widget_box_push(s, BOX_INTERACTIVE);
+    unsigned id = 0;
+    float tmpx = 0, tmpy = 0;
+    assert(s);
+    if (!s) return 0;
+
+    widget_begin(s, WIDGET_SCROLL_BOX);
+    id = widget_box_push(s, BOX_INTERACTIVE|BOX_UNIFORM);
+    scroll(s, &tmpx, &tmpy);
+    scroll(s, &tmpx, &tmpy);
+    scroll_region_begin(s);
+    return id;
 }
 api void
-scrolled_region_end(struct state *s)
+scroll_box_end(struct state *s)
 {
-    clip_region_end(s);
+    scroll_region_end(s);
+    widget_box_pop(s);
+    widget_end(s);
 }
+api void
+scroll_box_layout(struct box *b)
+{
+    /* retrieve pointer for each widget */
+    static const int scroll_size = 10;
+    struct list_hook *hx = b->lnks.next;
+    struct list_hook *hy = hx->next;
+    struct list_hook *hsr = hy->next;
+
+    struct box *bx = list_entry(hx, struct box, node);
+    struct box *by = list_entry(hy, struct box, node);
+    struct box *bsr = list_entry(hsr, struct box, node);
+
+    struct scroll x = scroll_ref(bx);
+    struct scroll y = scroll_ref(by);
+    struct scroll_region sr = scroll_region_ref(bsr);
+
+    /* x-scrollbar */
+    bx->loc.x = b->loc.x;
+    bx->loc.y = b->loc.y + b->loc.h - scroll_size;
+    bx->loc.w = b->loc.w;
+    bx->loc.h = scroll_size;
+
+    x.off_x = sr.off_x;
+    *x.size_x = b->loc.w;
+    *x.total_x = b->dw;
+
+    /* y-scrollbar */
+    by->loc.x = b->loc.x + b->loc.w - scroll_size;
+    by->loc.y = b->loc.y;
+    by->loc.w = scroll_size;
+    by->loc.h = b->loc.h;
+
+    y.off_y = sr.off_y;
+    *y.size_y = b->loc.h;
+    *y.total_y = b->dh;
+
+    /* scroll region */
+    bsr->loc.x = b->loc.x;
+    bsr->loc.y = b->loc.y;
+    bsr->loc.w = b->loc.w - scroll_size;
+    bsr->loc.h = b->loc.h - scroll_size;
+}
+
 /* ---------------------------------------------------------------------------
  *                              BUTTON_LABEL
  * --------------------------------------------------------------------------- */
@@ -3756,9 +3920,9 @@ button_label(struct state *s, const char *txt, int len)
 api int
 button_label_clicked(struct state *s, const char *label, int len)
 {
-    struct button_label btn;
-    btn = button_label(s, label, len);
-    return btn.btn.clicked != 0;
+    struct button_label bl;
+    bl = button_label(s, label, len);
+    return bl.btn.clicked != 0;
 }
 
 /* ===========================================================================
@@ -3847,7 +4011,7 @@ nvgSlider(struct NVGcontext *vg, struct box *b)
 {
     NVGpaint bg, knob;
     struct slider sld = slider_ref(b);
-    if (sld.cid == b->id) return;
+    if (sld.cid != b->id) return;
 
     {struct box *p = b->parent;
     float cy = p->scr.y+(int)(p->scr.h*0.5f);
@@ -3886,6 +4050,26 @@ nvgSlider(struct NVGcontext *vg, struct box *b)
     nvgStrokeColor(vg, nvgRGBA(0,0,0,92));
     nvgStroke(vg);
     nvgRestore(vg);}
+}
+api void
+nvgScroll(struct NVGcontext *vg, struct box *b)
+{
+    NVGpaint pt;
+    struct box *p = b->parent;
+    struct scroll scrl = scroll_ref(b);
+    if (scrl.cid != b->id) return;
+
+    pt = nvgBoxGradient(vg, p->scr.x, p->scr.y, p->scr.w, p->scr.h, 3,4, nvgRGBA(0,0,0,32), nvgRGBA(0,0,0,128));
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, p->scr.x, p->scr.y, p->scr.w, p->scr.h, 3);
+    nvgFillPaint(vg, pt);
+    nvgFill(vg);
+
+    pt = nvgBoxGradient(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, 3,4, nvgRGBA(40,43,48,32), nvgRGBA(0,0,0,128));
+    nvgBeginPath(vg);
+    nvgRoundedRect(vg, b->scr.x, b->scr.y, b->scr.w, b->scr.h, 3);
+    nvgFillPaint(vg, pt);
+    nvgFill(vg);
 }
 api void
 nvgClipRegion(struct NVGcontext *vg, struct box *b, struct rect *sis)
@@ -3959,8 +4143,10 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
                 struct box *b = op->boxes[i];
                 switch (b->type) {
                 case WIDGET_SLIDER: slider_layout(b); break;
+                case WIDGET_SCROLL: scroll_layout(b); break;
                 case WIDGET_SBOX: sbox_layout(b); break;
                 case WIDGET_FLEX_BOX: flex_box_layout(b); break;
+                case WIDGET_SCROLL_BOX: scroll_box_layout(b); break;
                 default: layout(p, b); break;}
             }
         } break;
@@ -3969,6 +4155,7 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
             for (i = op->begin; i != op->end; i += op->inc) {
                 struct box *b = op->boxes[i];
                 switch (b->type) {
+                case WIDGET_SCROLL_REGION: scroll_region_transform(b); break;
                 default: transform(p, b); break;}
             }
         } break;
@@ -3981,6 +4168,7 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
                     struct box *b = evt->hdr.boxes[i];
                     switch (b->type) {
                     case WIDGET_SLIDER: slider_input(b, evt); break;
+                    case WIDGET_SCROLL: scroll_input(b, evt); break;
                     case WIDGET_SCROLL_REGION: scroll_region_input(b, evt); break;
                     default: input(p, evt, b); break;}
                 }
@@ -4003,8 +4191,9 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
             case WIDGET_LABEL: nvgLabel(vg, b); break;
             case WIDGET_BUTTON: nvgButton(vg, b, nvgRGBA(128,16,8,255)); break;
             case WIDGET_SLIDER: nvgSlider(vg, b); break;
-            case WIDGET_SCROLL_REGION:
-            case WIDGET_CLIP_REGION: nvgClipRegion(vg, b, &scissor);
+            case WIDGET_SCROLL: nvgScroll(vg, b); break;
+            case WIDGET_SCROLL_BOX:
+            case WIDGET_CLIP_BOX: nvgClipRegion(vg, b, &scissor); break;
             default: break;}
         } nvgResetScissor(vg);
         process_end(p);
@@ -4069,6 +4258,8 @@ ui_event(struct context *ctx, const SDL_Event *evt)
         SDL_Keycode sym = evt->key.keysym.sym;
         if (sym == SDLK_BACKSPACE)
             input_shortcut(ctx, SHORTCUT_SCROLL_REGION_RESET, down);
+        else if (sym == SDLK_LALT)
+            input_shortcut(ctx, SHORTCUT_SCROLL_REGION_SCROLL, down);
         input_key(ctx, sym, down);
     } break;}
 }
@@ -4091,6 +4282,7 @@ int main(void)
     struct context *ctx;
     struct NVGcontext *vg;
     SDL_GLContext glContext;
+    float sld_val = 5.0f;
 
     /* SDL */
     SDL_Window *win = 0;
@@ -4137,7 +4329,9 @@ int main(void)
                     if (btn.clicked)
                         fprintf(stdout, "icon button clicked!\n");
                     button_end(s);
-                }
+                } /* slider */
+                flex_box_slot_static(s, &fbx, 120);
+                sliderf(s, 0.0f, &sld_val, 10.0f);
             } flex_box_end(s, &fbx);
             end(s);
         }}
