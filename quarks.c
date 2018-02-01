@@ -197,7 +197,6 @@ struct box {
     struct rect loc, scr;
 
     /* state */
-    unsigned hidden:1;
     unsigned clicked:1;
     unsigned pressed:1;
     unsigned released:1;
@@ -237,6 +236,10 @@ struct param_buffer {
 struct buffer {
     struct buffer *next;
     char buf[MAX_STR_BUF];
+};
+enum relationship {
+    RELATIONSHIP_INDEPENDENT,
+    RELATIONSHIP_DEPENDENT
 };
 struct state {
     unsigned id;
@@ -295,9 +298,12 @@ struct repository {
     int tree_depth;
 };
 struct module {
-    struct module *parent;
     struct list_hook hook;
+    struct module *parent;
+    struct module *owner;
+    enum relationship rel;
     unsigned id;
+    unsigned seq;
     int repoid;
     struct box *root;
     struct repository *repo[2];
@@ -484,6 +490,7 @@ struct config {
 };
 struct context {
     int state;
+    unsigned seq;
     struct config cfg;
     struct input input;
     union process proc;
@@ -520,11 +527,11 @@ struct context {
 };
 /* context */
 api struct context *create(const struct allocator *a, int default_font_height);
-api void destroy(struct context *ctx);
 api void init(struct context *ctx, const struct allocator *a, int default_font_height);
+api void destroy(struct context *ctx);
 
 /* process */
-api union process *process_begin(struct context *ctx, unsigned flags);
+api union process* process_begin(struct context *ctx, unsigned flags);
 api void blueprint(union process *p, struct box *b);
 api void layout(union process *p, struct box *b);
 api void transform(union process *p, struct box *b);
@@ -545,26 +552,27 @@ api void input_button(struct context *ctx, enum mouse_button btn, int down);
 /* module */
 api struct state* begin(struct context *ctx, unsigned id);
 api void end(struct state *s);
-api struct state* module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid);
+api struct state* module_begin(struct context *ctx, unsigned id, enum relationship, unsigned mid, unsigned bid);
 api void module_end(struct state *s);
 api void load(struct context *ctx, unsigned id, const struct component *c);
 api void call(struct context *ctx, unsigned id, const union param *op, int opcnt);
-api void section_begin(struct state *s, unsigned id);
+api struct state *section_begin(struct state *s, unsigned id);
 api void section_end(struct state *s);
-api void link(struct state *s, unsigned id);
+api void link(struct state *s, unsigned id, enum relationship);
 api void slot(struct state *s, unsigned id);
 
 /* popup */
-api void popup_begin(struct state *s, enum popup_type type);
-api void popup_show(struct context *ctx, struct box *b, enum visibility vis);
-api void popup_toggle(struct context *ctx, struct box *b);
+api struct state *popup_begin(struct state *s, unsigned id, enum popup_type type);
+api void popup_show(struct context *ctx, unsigned id, enum visibility vis);
+api void popup_toggle(struct context *ctx, unsigned id);
 api void popup_end(struct state *s);
 
 /* widget */
 api void widget_begin(struct state *s, int type);
-api unsigned widget_box_push(struct state *s, unsigned flags);
+api unsigned widget_box_push(struct state *s);
+api void widget_box_property_set(struct state *s, enum properties);
+api void widget_box_property_clear(struct state *s, enum properties);
 api void widget_box_pop(struct state *s);
-api unsigned widget_box(struct state *s, unsigned flags);
 api void widget_end(struct state *s);
 
 /* widget: push */
@@ -660,12 +668,14 @@ static const struct component g_root = {
     OP(BUF_BEGIN,       1,  "%u")\
     OP(BUF_ULINK,       2,  "%u %u")\
     OP(BUF_DLINK,       1,  "%u")\
+    OP(BUF_CONECT,      2,  "%u %d")\
     OP(BUF_END,         1,  "%u")\
     OP(WIDGET_BEGIN,    2,  "%d %d")\
     OP(WIDGET_END,      0,  "")  \
-    OP(BOX_BEGIN,       3,  "%u %u %u")\
     OP(BOX_PUSH,        2,  "%u %u")\
-    OP(BOX_END,         0,  "")\
+    OP(BOX_POP,         0,  "")\
+    OP(PROPERTY_SET,    1,  "%u")\
+    OP(PROPERTY_CLR,    1,  "%u")\
     OP(PUSH_FLOAT,      1,  "%f")\
     OP(PUSH_INT,        1,  "%d")\
     OP(PUSH_UINT,       1,  "%u")\
@@ -1264,7 +1274,8 @@ query(struct context *ctx, unsigned mid, unsigned id)
     return find(repo, id);
 }
 api struct state*
-module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
+module_begin(struct context *ctx, unsigned id,
+    enum relationship rel, unsigned mid, unsigned bid)
 {
     struct state *s = 0;
     assert(ctx);
@@ -1283,18 +1294,21 @@ module_begin(struct context *ctx, unsigned id, unsigned mid, unsigned bid)
     s->param_list = s->opbuf = arena_push(&s->arena, 1, szof(struct param_buffer), 0);
     s->buf_list = s->buf = arena_push(&s->arena, 1, szof(struct buffer), 0);
     s->mod = module_find(ctx, id);
-    s->repo = !s->mod ? 0: s->mod->repo[s->mod->repoid];
+    if (s->mod) s->repo = s->mod->repo[s->mod->repoid];
     list_init(&s->hook);
     list_add_tail(&ctx->states, &s->hook);
     pushid(s, id);
 
     /* serialize api call */
-    {union param p[5];
+    {union param p[8];
     p[0].op = OP_BUF_BEGIN;
     p[1].id = id;
     p[2].op = OP_BUF_ULINK;
     p[3].id = mid;
     p[4].id = bid;
+    p[5].op = OP_BUF_CONECT;
+    p[6].u = mid;
+    p[7].i = rel;
     op_add(s, p, cntof(p));}
     return s;
 }
@@ -1349,33 +1363,82 @@ module_destroy(struct context *ctx, unsigned id)
     } list_splice_tail(&ctx->garbage, &tmp);
     return 1;
 }
-api void
+api struct state*
 section_begin(struct state *s, unsigned id)
 {
     assert(s);
     assert(id && "Section are not allowed to overwrite root");
-    if (!s || !id) return;
-
-    {union param p[5];
-    p[0].op = OP_BUF_BEGIN;
-    p[1].id = id;
-    p[2].op = OP_BUF_ULINK;
-    p[3].id = s->id;
-    p[4].id = s->lastid;
-    op_add(s, p, cntof(p));}
+    if (!s || !id) return 0;
+    return module_begin(s->ctx, id, RELATIONSHIP_INDEPENDENT, s->id, s->lastid);
 }
 api void
 section_end(struct state *s)
 {
-    assert(s);
-    if (!s) return;
-    {union param p[2];
-    p[0].op = OP_BUF_END;
-    p[1].id = s->id;
-    op_add(s, p, cntof(p));}
+    module_end(s);
+}
+api struct state*
+popup_begin(struct state *s, unsigned id, enum popup_type type)
+{
+    unsigned bid = 0;
+    switch (type) {
+    case POPUP_BLOCKING:
+        bid = WIDGET_POPUP-WIDGET_LAYER_BEGIN; break;
+    case POPUP_NON_BLOCKING:
+        bid = WIDGET_CONTEXTUAL-WIDGET_LAYER_BEGIN; break;}
+    return module_begin(s->ctx, id, RELATIONSHIP_INDEPENDENT, 0, bid);
 }
 api void
-link(struct state *s, unsigned id)
+popup_end(struct state *s)
+{
+    union param p[2];
+    p[0].op = OP_BUF_END;
+    p[1].id = s->id;
+    op_add(s, p, cntof(p));
+}
+api struct box*
+popup_find(struct context *ctx, unsigned id)
+{
+    struct module *m = module_find(ctx, id);
+    if (!m || !m->root) return 0;
+    return m->root;
+}
+intern int
+popup_is_active(struct context *ctx, enum popup_type type)
+{
+    int active = 0;
+    struct list_hook *i = 0;
+    struct box *layer = 0;
+    struct box *skip = 0;
+
+    switch (type) {
+    default: assert(layer != 0); break;
+    case POPUP_BLOCKING:
+        layer = ctx->popup;
+        skip = ctx->contextual; break;
+    case POPUP_NON_BLOCKING:
+        layer = ctx->contextual;
+        skip = ctx->unblocking; break;}
+
+    assert(layer);
+    list_foreach(i, &layer->lnks) {
+        struct box *b = list_entry(i, struct box, node);
+        if (b == skip) continue;
+        if (!(b->flags & BOX_HIDDEN))
+            return 1;
+    } return active;
+}
+api void
+popup_show(struct context *ctx, unsigned id, enum visibility vis)
+{
+    struct box *pop = popup_find(ctx, id);
+    if (!pop) return;
+    if (vis == VISIBLE) {
+        pop->flags &= ~(unsigned)BOX_HIDDEN;
+    } else pop->flags |= BOX_HIDDEN;
+    ctx->blocking->flags &= ~(unsigned)BOX_INTERACTIVE;
+}
+api void
+link(struct state *s, unsigned id, enum relationship rel)
 {
     assert(s);
     if (!s) return;
@@ -1389,7 +1452,7 @@ begin(struct context *ctx, unsigned id)
 {
     assert(ctx);
     if (!ctx) return 0;
-    return module_begin(ctx, id, 0, WIDGET_UI-WIDGET_LAYER_BEGIN);
+    return module_begin(ctx, id, RELATIONSHIP_INDEPENDENT, 0, WIDGET_UI-WIDGET_LAYER_BEGIN);
 }
 api void
 end(struct state *s)
@@ -1403,13 +1466,12 @@ slot(struct state *s, unsigned id)
 {
     assert(s);
     if (!s) return;
-    {union param p[5];
+    {union param p[4];
     widget_begin(s, WIDGET_SLOT);
-    p[0].op = OP_BOX_BEGIN;
+    p[0].op = OP_BOX_PUSH;
     p[1].id = id;
     p[2].id = s->wstk[s->wtop-1].id;
-    p[3].flags = id;
-    p[4].op = OP_BOX_END;
+    p[3].op = OP_BOX_POP;
     op_add(s, p, cntof(p));}
     widget_end(s);
 }
@@ -1431,16 +1493,15 @@ widget_begin(struct state *s, int type)
     s->wtop++;}
 }
 api unsigned
-widget_box_push(struct state *s, unsigned flags)
+widget_box_push(struct state *s)
 {
     assert(s);
     if (!s) return 0;
 
-    {union param p[4];
-    p[0].op = OP_BOX_BEGIN;
+    {union param p[3];
+    p[0].op = OP_BOX_PUSH;
     p[1].id = genid(s);
     p[2].id = s->wstk[s->wtop-1].id;
-    p[3].flags = flags;
     op_add(s, p, cntof(p));
 
     s->depth++;
@@ -1454,20 +1515,26 @@ widget_box_pop(struct state *s)
     assert(s);
     if (!s) return;
     {union param p[1];
-    p[0].op = OP_BOX_END;
+    p[0].op = OP_BOX_POP;
     op_add(s, p, cntof(p));
     assert(s->depth);
     s->depth = max(s->depth-1, 0);}
 }
-api unsigned
-widget_box(struct state *s, unsigned flags)
+api void
+widget_box_property_set(struct state *s, enum properties prop)
 {
-    assert(s);
-    if (!s) return 0;
-    {unsigned id = 0;
-    id = widget_box_push(s, flags);
-    widget_box_pop(s);
-    return id;}
+    union param p[2];
+    p[0].op = OP_PROPERTY_SET;
+    p[1].u = prop;
+    op_add(s, p, cntof(p));
+}
+api void
+widget_box_property_clear(struct state *s, enum properties prop)
+{
+    union param p[2];
+    p[0].op = OP_PROPERTY_CLR;
+    p[1].u = prop;
+    op_add(s, p, cntof(p));
 }
 intern union param*
 widget_push_param(struct state *s, union param *p)
@@ -1681,67 +1748,6 @@ widget_end(struct state *s)
     op_add(s, p, cntof(p));}
     s->wtop = max(s->wtop-1, 0);
 }
-api void
-popup_begin(struct state *s, enum popup_type type)
-{
-    unsigned mid = 0;
-    switch (type) {
-    case POPUP_BLOCKING:
-        mid = WIDGET_BLOCKING; break;
-    case POPUP_NON_BLOCKING:
-        mid = WIDGET_UNBLOCKING; break;}
-
-    {union param p[3];
-    p[0].op = OP_BOX_PUSH;
-    p[1].id = 0;
-    p[2].id = mid - WIDGET_UI;
-    op_add(s, p, cntof(p));}
-}
-api void
-popup_end(struct state *s)
-{
-    widget_box_pop(s);
-}
-intern int
-popup_is_active(struct context *ctx, enum popup_type type)
-{
-    int active = 0;
-    struct list_hook *i = 0;
-    struct box *layer = 0;
-    struct box *skip = 0;
-
-    switch (type) {
-    default: assert(layer != 0); break;
-    case POPUP_BLOCKING:
-        layer = ctx->popup;
-        skip = ctx->contextual; break;
-    case POPUP_NON_BLOCKING:
-        layer = ctx->contextual;
-        skip = ctx->unblocking; break;}
-
-    assert(layer);
-    list_foreach(i, &layer->lnks) {
-        struct box *b = list_entry(i, struct box, node);
-        if (b == skip) continue;
-        if (!b->hidden) return 1;
-    } return active;
-}
-api void
-popup_show(struct context *ctx, struct box *pop, enum visibility vis)
-{
-    if (!pop) return;
-    if (vis == HIDDEN)
-        pop->flags |= BOX_HIDDEN;
-    else pop->flags = ~(unsigned)BOX_HIDDEN;
-}
-api void
-popup_toggle(struct context *ctx, struct box *pop)
-{
-    if (!pop) return;
-    if (pop->flags & BOX_HIDDEN)
-        pop->flags &= ~(unsigned)BOX_HIDDEN;
-    else pop->flags |= BOX_HIDDEN;
-}
 intern int
 box_intersect(const struct box *f, const struct box *s)
 {
@@ -1774,7 +1780,7 @@ dfs(struct box **buf, struct box **stk, struct box *root)
         buf[tail++] = b;
         list_foreach_rev(i, &b->lnks) {
             struct box *s = list_entry(i,struct box,node);
-            if (s->hidden /*|| !box_intersect(b, s) */) continue;
+            if (s->flags & BOX_HIDDEN /*|| !box_intersect(b, s) */) continue;
             stk[head++] = s;
         }
     } return tail;
@@ -2016,7 +2022,7 @@ process_begin(struct context *ctx, unsigned flags)
         STATE_INPUT, STATE_PAINT,
         STATE_SERIALIZE, STATE_SERIALIZE_DISPATCH,
         STATE_SERIALIZE_TRACE, STATE_SERIALIZE_TABLE, STATE_SERIALIZE_BINARY,
-        STATE_GC, STATE_CLEAR, STATE_CLEANUP, STATE_DONE
+        STATE_CLEAR, STATE_GC, STATE_CLEANUP, STATE_DONE
     };
     static const struct opdef {
         enum opcodes type;
@@ -2086,8 +2092,10 @@ process_begin(struct context *ctx, unsigned flags)
         }
         s = list_entry(ctx->iter, struct state, hook);
         s->mod = module_find(ctx, s->id);
-        if (s->mod) jmpto(ctx, STATE_CALC_REQ_MEMORY);
-
+        if (s->mod) {
+            s->mod->seq = ctx->seq;
+            jmpto(ctx, STATE_CALC_REQ_MEMORY);
+        }
         operation_begin(p, PROC_ALLOC, ctx, &ctx->arena);
         p->mem.size = szof(struct module);
         ctx->state = STATE_ALLOC_PERSISTENT;
@@ -2102,6 +2110,7 @@ process_begin(struct context *ctx, unsigned flags)
         zero(m, szof(*m));
         list_init(&m->hook);
         m->id = s->id;
+        m->seq = ctx->seq;
         s->mod = m;
         list_add_tail(&ctx->mod, &m->hook);}
 
@@ -2190,27 +2199,8 @@ process_begin(struct context *ctx, unsigned flags)
                 ob = (struct param_buffer*)op[1].p;
                 op = ob->ops; break;
             case OP_BUF_BEGIN: {
-                struct state *ss = 0;
-                if (op[1].id == s->id) break;
-
-                /* split sub-module from current op-buffer */
-                ss = arena_push_type(&ctx->arena, struct state);
-                ss->id = op[1].id;
-                ss->ctx = ctx;
-                ss->param_list = ob;
-                ss->arena.mem = &ctx->blkmem;
-                ss->op_begin = cast(int, op - ob->ops);
-                list_init(&ss->hook);
-                list__add(&ss->hook, &s->hook, s->hook.next);
-
-                /* skip sub-module */
-                while (1) {
-                    switch (op[0].op) {
-                    case OP_NEXT_BUF: op = (union param*)op[1].p; break;
-                    case OP_BUF_END: if (op[1].id == ss->id) goto eos;}
-                    op += opdefs[op[0].op].argc + 1;
-                } eos:; break;
-            }
+                assert(op[1].id == s->id);
+            } break;
             case OP_BUF_ULINK: {
                 /* find parent module */
                 struct repository *prepo = 0;
@@ -2230,14 +2220,14 @@ process_begin(struct context *ctx, unsigned flags)
 
                 /* relink child module directly after parent */
                 list_del(&m->hook);
-                list__add(&m->hook, &pm->hook, pm->hook.next);
+                list_add_tail(&ctx->mod, &m->hook);
                 m->parent = pm;
             } break;
             case OP_BUF_DLINK: {
                 /* find child module */
                 struct repository *crepo = 0;
                 struct module *cm = module_find(ctx, op[1].id);
-                if (!cm->root) break;
+                if (!cm || !cm->root) break;
                 crepo = cm->repo[cm->repoid];
                 if (!crepo) break;
 
@@ -2253,6 +2243,13 @@ process_begin(struct context *ctx, unsigned flags)
                 list_del(&cm->hook);
                 list__add(&cm->hook, &m->hook, m->hook.next);
                 cm->parent = m;
+            } break;
+            case OP_BUF_CONECT: {
+                /* setup lifetime connection */
+                struct module *pm = module_find(ctx, op[1].id);
+                if (!pm) break;
+                m->owner = pm;
+                m->rel = (enum relationship)op[2].i;
             } break;
 
             /* --------------------------- Widgets -------------------------- */
@@ -2304,22 +2301,9 @@ process_begin(struct context *ctx, unsigned flags)
             } break;
 
             /* ---------------------------- Boxes ----------------------------*/
-            case OP_BOX_PUSH: {
-                struct repository *pr = 0;
-                struct module *pm = module_find(ctx, op[1].id);
-                if (!pm->root) break;
-                pr = pm->repo[pm->repoid];
-                if (!pr) break;
-
-                /* push box into stack */
-                {struct box *pb = find(pr, op[2].id);
-                if (!pb) break;
-                assert(depth < MAX_TREE_DEPTH);
-                boxstk[depth++] = pb;}
-            } break;
-            case OP_BOX_END:
+            case OP_BOX_POP:
                 assert(depth > 1); depth--; break;
-            case OP_BOX_BEGIN: {
+            case OP_BOX_PUSH: {
                 struct gizmo *g = 0;
                 unsigned id = op[1].id;
                 int idx = repo->boxcnt++;
@@ -2339,7 +2323,7 @@ process_begin(struct context *ctx, unsigned flags)
                 b->parent = pb;
                 b->depth = depth;
                 b->wid = op[2].id;
-                b->flags = op[3].flags;
+                b->flags = BOX_INTERACTIVE;
                 b->params = repo->params + g->params;
                 b->buf = repo->buf;
 
@@ -2359,6 +2343,15 @@ process_begin(struct context *ctx, unsigned flags)
                 /* push box into stack */
                 assert(depth < MAX_TREE_DEPTH);
                 boxstk[depth++] = b;}
+            } break;
+            /* -------------------------- Properties -------------------------*/
+            case OP_PROPERTY_SET: {
+                struct box *b = boxstk[depth-1];
+                b->flags |= op[1].u;
+            } break;
+            case OP_PROPERTY_CLR: {
+                struct box *b = boxstk[depth-1];
+                b->flags &= ~op[1].u;
             } break;}
             op += opdefs[op[0].op].argc + 1;
         } eol0:;}
@@ -2877,19 +2870,24 @@ process_begin(struct context *ctx, unsigned flags)
     }
     case STATE_GC: {
         struct module *m = 0;
-        struct repository *r = 0;
         union process *p = &ctx->proc;
 
         /* free each modules old data */
         do {ctx->iter = it(&ctx->mod, ctx->iter);
-            if (!ctx->iter) jmpto(ctx, STATE_CLEAR);
-            m = list_entry(ctx->iter, struct module, hook);
-        } while (!m->repo[!m->repoid]);
+            if (!ctx->iter) {
+                /* free not updated dependend modules */
+                struct list_hook *h = 0;
+                d:list_foreach(h, &ctx->mod) {
+                    m = list_entry(h, struct module, hook);
+                    if (m->rel != RELATIONSHIP_DEPENDENT) continue;
 
-        /* unlink all boxes from tree */
-        r = m->repo[!m->repoid];
-        for (i = 0; i < r->boxcnt; ++i)
-            list_del(&r->boxes[i].node);
+                    {struct module *pm = m->owner;
+                    if (pm->seq == m->seq) continue;
+                    module_destroy(ctx, m->id);
+                    goto d;}
+                } jmpto(ctx, STATE_CLEAR);
+            } m = list_entry(ctx->iter, struct module, hook);
+        } while (!m->repo[!m->repoid]);
 
         operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
         p->mem.ptr = m->repo[!m->repoid];
@@ -2901,10 +2899,12 @@ process_begin(struct context *ctx, unsigned flags)
         struct module *m = 0;
         union process *p = &ctx->proc;
         if (list_empty(&ctx->garbage)) {
+            /* start new frame */
             list_init(&ctx->garbage);
             arena_clear(&ctx->arena);
             if (flags & flag(PROC_FULL_CLEAR))
                 free_blocks(&ctx->blkmem);
+            ctx->seq++;
             jmpto(ctx, STATE_DONE);
         }
         /* free temporary frame repository memory */
@@ -3042,7 +3042,7 @@ input(union process *op, union event *evt, struct box *b)
         struct box *contextual = 0;
 
         if (evt->hdr.origin != b) break;
-        if (!b->clicked || evt->type == EVT_CLICKED) break;
+        if (!b->clicked || evt->type != EVT_CLICKED) break;
         ctx = op->hdr.ctx;
 
         /* hide all contextual menus */
@@ -3050,7 +3050,7 @@ input(union process *op, union event *evt, struct box *b)
         list_foreach(i, &contextual->lnks) {
             struct box *c = list_entry(i,struct box,node);
             if (c == b) continue;
-            c->hidden = 1;
+            c->flags |= BOX_HIDDEN;
         }
     } break;}
 }
@@ -3242,6 +3242,7 @@ enum widget_type {
     WIDGET_SBOX,
     WIDGET_GRID_BOX,
     WIDGET_FLEX_BOX,
+    WIDGET_WIN_BOX,
     /* Regions */
     WIDGET_CLIP_BOX,
     WIDGET_SCROLL_REGION,
@@ -3263,6 +3264,7 @@ enum widget_shortcuts {
  *                                  LABEL
  * --------------------------------------------------------------------------- */
 struct label {
+    unsigned id;
     const char *txt;
     int *font;
     int *height;
@@ -3282,7 +3284,9 @@ label(struct state *s, const char *txt, int len)
     struct label lbl = {0};
     const struct config *cfg = s->cfg;
     widget_begin(s, WIDGET_LABEL);
-    widget_box(s, BOX_INTERACTIVE);
+    lbl.id = widget_box_push(s);
+    widget_box_pop(s);
+
     lbl.height = widget_push_param_int(s, cfg->font_default_height);
     lbl.font = widget_push_param_int(s, 0);
     lbl.txt = widget_push_param_str(s, txt, len);
@@ -3345,7 +3349,7 @@ button_begin(struct state *s)
     struct button btn;
     zero(&btn, szof(btn));
     widget_begin(s, WIDGET_BUTTON);
-    btn.id = widget_box_push(s, BOX_INTERACTIVE);
+    btn.id = widget_box_push(s);
     button_poll(s, &btn, btn.id);
     return btn;
 }
@@ -3386,8 +3390,10 @@ sliderf(struct state *s, float min, float *value, float max)
         sld.value = widget_push_modifier_float(s, value);
         sld.max = widget_push_param_float(s, max);
         sld.cursor_size = widget_push_param_int(s, 10);
-        sld.id = widget_box_push(s, BOX_INTERACTIVE);
-            sld.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE_X);
+        sld.id = widget_box_push(s);
+            sld.cid = widget_box_push(s);
+            widget_box_property_set(s, BOX_MOVABLE_X);
+            widget_box_pop(s);
             widget_push_param_id(s, sld.cid);
         widget_box_pop(s);
     widget_end(s);
@@ -3482,14 +3488,16 @@ scroll_begin(struct state *s, float *off_x, float *off_y)
     scrl.size_y = widget_push_param_float(s, 1);
     scrl.off_x = widget_push_modifier_float(s, off_x);
     scrl.off_y = widget_push_modifier_float(s, off_y);
-    scrl.id = widget_box_push(s, BOX_INTERACTIVE);
-    scrl.cid = widget_box(s, BOX_INTERACTIVE|BOX_MOVABLE);
+    scrl.id = widget_box_push(s);
+    scrl.cid = widget_box_push(s);
+    widget_box_property_set(s, BOX_MOVABLE);
     widget_push_param_id(s, scrl.cid);
     return scrl;
 }
 api void
 scroll_end(struct state *s)
 {
+    widget_box_pop(s);
     widget_box_pop(s);
     widget_end(s);
 }
@@ -3545,15 +3553,13 @@ enum combo_state {
 struct combo {
     int *state;
     unsigned *popup;
-    unsigned *mid;
 };
 api struct combo
 combo_ref(struct box *b)
 {
     struct combo c = {0};
     c.state = widget_get_int(b, 0);
-    c.mid = widget_get_id(b, 1);
-    c.popup = widget_get_id(b, 2);
+    c.popup = widget_get_id(b, 1);
     return c;
 }
 api struct combo
@@ -3561,10 +3567,30 @@ combo_begin(struct state *s)
 {
     struct combo c = {0};
     widget_begin(s, WIDGET_COMBO);
+    widget_box_push(s);
     c.state = widget_push_state_int(s, COMBO_COLLAPSED);
-    c.mid = widget_push_param_id(s, s->id);
-    widget_box_push(s, BOX_INTERACTIVE);
     return c;
+}
+api struct state*
+combo_popup_begin(struct state *s, struct combo *c)
+{
+    struct state *ps = 0;
+    c->popup = widget_push_param_id(s, genid(s));
+    ps = popup_begin(s, *c->popup, POPUP_NON_BLOCKING);
+    widget_begin(ps, WIDGET_COMBO_POPUP);
+    widget_box_push(ps);
+    if (ps->mod && (ps->mod->root->flags & BOX_HIDDEN))
+        *c->state = COMBO_COLLAPSED;
+    return ps;
+}
+api void
+combo_popup_end(struct state *s, struct combo *c)
+{
+    widget_box_pop(s);
+    widget_end(s);
+    if (*c->state == COMBO_COLLAPSED)
+        widget_box_property_set(s, BOX_HIDDEN);
+    popup_end(s);
 }
 api void
 combo_end(struct state *s)
@@ -3573,29 +3599,36 @@ combo_end(struct state *s)
     widget_end(s);
 }
 api void
-combo_popup_toggle(struct context *ctx, struct combo *c)
+combo_popup_show(struct context *ctx, struct combo *c)
 {
-    struct box *pop = query(ctx, *c->mid, *c->popup);
-    if (!pop) return;
-    popup_toggle(ctx, pop);
-    *c->state = !*c->state;
+    *c->state = COMBO_VISIBLE;
+    popup_show(ctx, *c->popup, VISIBLE);
 }
 api void
-combo_layout(struct context *ctx, struct repository *repo, struct box *b)
+combo_popup_close(struct context *ctx, struct combo *c)
+{
+    *c->state = COMBO_COLLAPSED;
+    popup_show(ctx, *c->popup, HIDDEN);
+}
+api void
+combo_layout(struct context *ctx, struct box *b)
 {
     struct combo c = combo_ref(b);
-    struct box *pop = find(repo, *c.popup);
-    pop->loc.y = b->loc.y + b->loc.h;
-    pop->loc.x = b->loc.x;
-    pop->loc.w = max(b->loc.w, pop->loc.w);
+    struct box *p = popup_find(ctx, *c.popup);
+    assert(p);
+    p->loc.y = b->loc.y + b->loc.h;
+    p->loc.x = b->loc.x;
+    p->loc.w = max(b->loc.w, p->dw);
+    p->loc.h = p->dh;
     box_layout(b, 0);
 }
 api void
-combo_transform(struct context *ctx, struct repository *repo, struct box *b)
+combo_transform(struct context *ctx, struct box *b)
 {
     struct combo c = combo_ref(b);
-    struct box *p = find(repo, *c.popup);
+    struct box *p = popup_find(ctx, *c.popup);
     if (!p) return;
+    transform(0, b);
     transform_concat(&p->tscr, &b->tscr, &p->tloc);
     transform_rect(&p->scr, &p->loc, &p->tscr);
 }
@@ -3603,28 +3636,10 @@ api void
 combo_input(struct context *ctx, struct box *b, const union event *evt)
 {
     struct combo c = combo_ref(b);
-    if (!b->clicked || evt->type == EVT_CLICKED) return;
-    combo_popup_toggle(ctx, &c);
-}
-api void
-combo_popup_begin(struct state *s, struct combo *c)
-{
-    unsigned pop = 0;
-    unsigned flags = BOX_INTERACTIVE;
-    if (*c->state == COMBO_COLLAPSED)
-        flags |= BOX_HIDDEN;
-
-    popup_begin(s, POPUP_NON_BLOCKING);
-    widget_begin(s, WIDGET_COMBO_POPUP);
-    widget_box_push(s, flags);
-    c->popup = widget_push_param_id(s, pop);
-}
-api void
-combo_popup_end(struct state *s)
-{
-    widget_box_pop(s);
-    widget_end(s);
-    popup_end(s);
+    if (!b->clicked || evt->type != EVT_CLICKED) return;
+    if (*c.state == COMBO_COLLAPSED)
+        combo_popup_show(ctx, &c);
+    else combo_popup_close(ctx, &c);
 }
 
 /* ---------------------------------------------------------------------------
@@ -3669,8 +3684,9 @@ sbox_begin(struct state *s)
     sbx.halign = widget_push_param_int(s, SBOX_HALIGN_LEFT);
     sbx.padx = widget_push_param_int(s, 6);
     sbx.pady = widget_push_param_int(s, 6);
-    sbx.id = widget_box_push(s, BOX_INTERACTIVE);
-    sbx.content = widget_box_push(s, BOX_INTERACTIVE);
+
+    sbx.id = widget_box_push(s);
+    sbx.content = widget_box_push(s);
     widget_push_param_id(s, sbx.content);
     return sbx;
 }
@@ -3779,7 +3795,9 @@ grid_box_begin(struct state *s)
 {
     struct grid_box gbx;
     widget_begin(s, WIDGET_GRID_BOX);
-    gbx.id = widget_box_push(s, BOX_INTERACTIVE|BOX_UNIFORM);
+    gbx.id = widget_box_push(s);
+    widget_box_property_set(s, BOX_UNIFORM);
+
     widget_push_param_id(s, gbx.id);
     gbx.padding = widget_push_param_int(s, 4);
     gbx.spacing = widget_push_param_int(s, 4);
@@ -3792,7 +3810,7 @@ grid_box_slot(struct state *s, struct grid_box *gbx, int col, int row)
     int idx = *gbx->cnt;
     unsigned id = 0;
     if (idx) widget_box_pop(s);
-    id = widget_box_push(s, BOX_INTERACTIVE);
+    id = widget_box_push(s);
     widget_push_param_int(s, col);
     widget_push_param_int(s, row);
     *gbx->cnt = *gbx->cnt + 1;
@@ -3897,7 +3915,8 @@ flex_box_begin(struct state *s)
 {
     struct flex_box fbx;
     widget_begin(s, WIDGET_FLEX_BOX);
-    fbx.id = widget_box_push(s, BOX_INTERACTIVE|BOX_UNIFORM);
+    fbx.id = widget_box_push(s);
+    widget_box_property_set(s, BOX_UNIFORM);
     widget_push_param_id(s, fbx.id);
     fbx.orientation = widget_push_param_int(s, FLEX_BOX_HORIZONTAL);
     fbx.padding = widget_push_param_int(s, 4);
@@ -3912,7 +3931,7 @@ flex_box_slot(struct state *s, struct flex_box *fbx,
     int idx = *fbx->cnt;
     unsigned id = 0;
     if (idx) widget_box_pop(s);
-    id = widget_box_push(s, BOX_INTERACTIVE);
+    id = widget_box_push(s);
     widget_push_param_int(s, type);
     widget_push_param_int(s, value);
     *fbx->cnt = *fbx->cnt + 1;
@@ -4124,14 +4143,15 @@ api unsigned
 clip_box_begin(struct state *s)
 {
     widget_begin(s, WIDGET_CLIP_BOX);
-    return widget_box_push(s, BOX_INTERACTIVE);
+    return widget_box_push(s);
 }
 api void
 clip_box_end(struct state *s)
 {
     unsigned int id;
-    id = widget_box(s, BOX_INTERACTIVE|BOX_HIDDEN);
+    id = widget_box_push(s);
     widget_push_param_id(s, id);
+    widget_box_pop(s);
     widget_box_pop(s);
     widget_end(s);
 }
@@ -4166,7 +4186,7 @@ scroll_region_begin(struct state *s)
     sr.dir = widget_push_state_int(s, SCROLL_DEFAULT);
     sr.off_x = widget_push_state_float(s, 0);
     sr.off_y = widget_push_state_float(s, 0);
-    sr.id = widget_box_push(s, BOX_INTERACTIVE);
+    sr.id = widget_box_push(s);
     widget_push_param_id(s, sr.id);
     return sr;
 }
@@ -4222,7 +4242,9 @@ scroll_box_begin(struct state *s)
     if (!s) return 0;
 
     widget_begin(s, WIDGET_SCROLL_BOX);
-    id = widget_box_push(s, BOX_INTERACTIVE|BOX_UNIFORM);
+    id = widget_box_push(s);
+    widget_box_property_set(s, BOX_UNIFORM);
+
     x = scroll(s, &tmpx, &tmpy);
     y = scroll(s, &tmpx, &tmpy);
     sr = scroll_region_begin(s);
@@ -4335,7 +4357,6 @@ scroll_box_input(struct box *b, union event *evt)
             if (evt->key.pressed) *sr.off_y = max(*sr.off_y - *y.size_y, 0);
     }
 }
-
 /* ---------------------------------------------------------------------------
  *                              BUTTON_LABEL
  * --------------------------------------------------------------------------- */
@@ -4350,7 +4371,7 @@ button_label(struct state *s, const char *txt, int len)
 {
     struct button_label btn;
     widget_begin(s, WIDGET_BUTTON_LABEL);
-        widget_box_push(s, BOX_INTERACTIVE);
+        widget_box_push(s);
         btn.btn = button_begin(s);
             btn.sbx = sbox_begin(s);
             *btn.sbx.halign = SBOX_HALIGN_CENTER;
@@ -4578,10 +4599,10 @@ nvgComboPopup(struct NVGcontext *vg, struct box *b)
     nvgFill(vg);
 }
 api void
-nvgClipRegion(struct NVGcontext *vg, struct box *b, struct rect *sis)
+nvgClipRegion(struct NVGcontext *vg, struct box *b, int pid, struct rect *sis)
 {
-    union param *p = b->params;
-    if (b->id != p[0].id) {
+    unsigned reset_id = *widget_get_id(b,pid);
+    if (b->id != reset_id) {
         /* safe old scissor rect and generate new one */
         struct list_hook *t = b->lnks.prev;
         struct box *n = list_entry(t, struct box, node);
@@ -4642,7 +4663,7 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
                 switch (b->type) {
                 case WIDGET_SLIDER: slider_layout(b); break;
                 case WIDGET_SCROLL: scroll_layout(b); break;
-                case WIDGET_COMBO: combo_layout(ctx, op->repo, b); break;
+                case WIDGET_COMBO: combo_layout(ctx, b); break;
                 case WIDGET_SBOX: sbox_layout(b); break;
                 case WIDGET_GRID_BOX: grid_box_layout(b); break;
                 case WIDGET_FLEX_BOX: flex_box_layout(b); break;
@@ -4655,7 +4676,7 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
             for (i = op->begin; i != op->end; i += op->inc) {
                 struct box *b = op->boxes[i];
                 switch (b->type) {
-                case WIDGET_COMBO: combo_transform(ctx, op->repo, b); break;
+                case WIDGET_COMBO: combo_transform(ctx, b); break;
                 case WIDGET_SCROLL_REGION: scroll_region_transform(b); break;
                 default: transform(p, b); break;}
             }
@@ -4696,8 +4717,8 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
             case WIDGET_SLIDER: nvgSlider(vg, b); break;
             case WIDGET_COMBO_POPUP: nvgComboPopup(vg, b); break;
             case WIDGET_SCROLL: nvgScroll(vg, b); break;
-            case WIDGET_SCROLL_REGION:
-            case WIDGET_CLIP_BOX: nvgClipRegion(vg, b, &scissor); break;
+            case WIDGET_SCROLL_REGION: nvgClipRegion(vg, b, 4, &scissor); break;
+            case WIDGET_CLIP_BOX: nvgClipRegion(vg, b, 0, &scissor); break;
             default: break;}
         } nvgResetScissor(vg);
         process_end(p);
@@ -4797,7 +4818,6 @@ int main(void)
     struct context *ctx;
     struct NVGcontext *vg;
     SDL_GLContext glContext;
-    float sld_val = 5.0f;
 
     /* SDL */
     SDL_Window *win = 0;
@@ -4825,22 +4845,11 @@ int main(void)
             ui_event(ctx, &evt);
         }
         /* GUI */
-        {struct state *s = 0;
+        {int i = 0; struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
-#if 0
-            int i = 0;
-            scroll_box_begin(s); {
-                struct flex_box fbx = flex_box_begin(s); {
-                *fbx.orientation = FLEX_BOX_VERTICAL;
-                    for (i = 0; i < 24; ++i) {
-                        flex_box_slot_static(s, &fbx, 40);
-                        button_label(s, txt("Label"));
-                    }
-                } flex_box_end(s, &fbx);
-            } scroll_box_end(s);
-#endif
-
-            struct flex_box fbx = flex_box_begin(s); {
+            struct grid_box gbx = grid_box_begin(s);
+            grid_box_slot(s, &gbx, 0, 0);
+            {struct flex_box fbx = flex_box_begin(s); {
                 /* label button */
                 flex_box_slot_fitting(s, &fbx);
                 if (button_label_clicked(s, txt("Label")))
@@ -4860,18 +4869,19 @@ int main(void)
                     button_end(s);
                 }
                 /* slider */
+                {static float sld_val = 5.0f;
                 flex_box_slot_static(s, &fbx, 120);
-                sliderf(s, 0.0f, &sld_val, 10.0f);
+                sliderf(s, 0.0f, &sld_val, 10.0f);}
 
                 /* combo */
                 flex_box_slot_static(s, &fbx, 150); {
-                    struct combo c = combo_begin(s); {
-                        static int sel = 0;
-                        static const char *items[] = {"Pistol","Shotgun","Plasma","BFG"};
+                struct combo c = combo_begin(s); {
+                    static int sel = 0;
+                    static const char *items[] = {"Pistol","Shotgun","Plasma","BFG"};
 
-                        /* header */
-                        button_begin(s);
-                        {struct flex_box fb = flex_box_begin(s);
+                    /* header */
+                    button_begin(s); {
+                        struct flex_box fb = flex_box_begin(s);
                         flex_box_slot_dyn(s, &fb); {
                             struct sbox x = sbox_begin(s);
                             *x.padx = *x.pady = 2;
@@ -4888,26 +4898,34 @@ int main(void)
                                 {struct label lbl = label(s, txt(ICON_FA_CARET_DOWN));
                                 *lbl.font = fnts[FONT_ICONS];}
                             sbox_end(s);
-                        } flex_box_end(s, &fb);}
-                        button_end(s);
+                        } flex_box_end(s, &fb);
+                    } button_end(s);
 
-#if 0
-                        /* popup */
-                        combo_popup_begin(s, &c); {
-                            struct flex_box fb = flex_box_begin(s); {
-                            *fb.orientation = FLEX_BOX_VERTICAL;
-                            for (i = 0; i < cntof(items); ++i) {
-                                flex_box_slot_fitting(s, &fb);
-                                if (button_label_clicked(s, txt(items[i]))) {
-                                    combo_popup_toggle(ctx, &c);
-                                    sel = i;
-                                }
-                            }} flex_box_end(s, &fb);
-                        } combo_popup_end(s);
-#endif
-                    } combo_end(s);
-                }
-            } flex_box_end(s, &fbx);
+                    /* popup */
+                    {struct state *ps = combo_popup_begin(s, &c); {
+                        struct grid_box gb = grid_box_begin(ps); {
+                        for (i = 0; i < cntof(items); ++i) {
+                            grid_box_slot(ps, &gb, 0, i);
+                            if (button_label_clicked(ps, txt(items[i]))) {
+                                combo_popup_close(ctx, &c);
+                                sel = i;
+                            }
+                        }} grid_box_end(ps, &gb);
+                    } combo_popup_end(ps, &c);}
+                } combo_end(s);}
+            } flex_box_end(s, &fbx);}
+
+            grid_box_slot(s, &gbx, 1, 0);
+            scroll_box_begin(s); {
+                struct flex_box fbx = flex_box_begin(s); {
+                *fbx.orientation = FLEX_BOX_VERTICAL;
+                    for (i = 0; i < 24; ++i) {
+                        flex_box_slot_static(s, &fbx, 40);
+                        button_label(s, txt("Label"));
+                    }
+                } flex_box_end(s, &fbx);
+            } scroll_box_end(s);
+            grid_box_end(s, &gbx);
             end(s);
         }}
         /* Paint */
