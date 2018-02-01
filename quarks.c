@@ -11,8 +11,9 @@
 #include <stdio.h> /* fprintf, fputc */
 
 /* TODO: Library
- * - Make reordering persistent over frames (zorder flag in box?)
- * - Implement overlay box property for clipping regions
+ * - Make reordering persistent over frames (zorder flag in box?) !!
+ * - Implement overlay box property for clipping regions !!
+ * - Implement table serialization for `depending` modules !!
  */
 #undef min
 #undef max
@@ -289,13 +290,12 @@ struct repository {
     struct table tbl;
     struct box *boxes;
     struct box **bfs;
-    union param *params;
-    char *buf;
     int boxcnt;
+    union param *params;
     int argcnt;
+    char *buf;
     int bufsiz;
-    int depth;
-    int tree_depth;
+    int depth, tree_depth;
 };
 struct module {
     struct list_hook hook;
@@ -3242,12 +3242,10 @@ enum widget_type {
     WIDGET_SBOX,
     WIDGET_GRID_BOX,
     WIDGET_FLEX_BOX,
-    WIDGET_WIN_BOX,
     /* Regions */
     WIDGET_CLIP_BOX,
     WIDGET_SCROLL_REGION,
     WIDGET_SCROLL_BOX,
-    WIDGET_PANEL,
     WIDGET_TYPE_COUNT
 };
 enum widget_shortcuts {
@@ -4556,15 +4554,14 @@ nvgScroll(struct NVGcontext *vg, struct box *b)
     struct box *p = b->parent;
     struct scroll scrl = scroll_ref(b);
     if (scrl.cid != b->id) return;
+    if (b->scr.h == p->scr.h && b->scr.w == p->scr.w)
+        return;
 
     pt = nvgBoxGradient(vg, p->scr.x, p->scr.y, p->scr.w, p->scr.h, 3,4, nvgRGBA(0,0,0,32), nvgRGBA(0,0,0,92));
     nvgBeginPath(vg);
     nvgRoundedRect(vg, p->scr.x, p->scr.y, p->scr.w, p->scr.h, 3);
     nvgFillPaint(vg, pt);
     nvgFill(vg);
-
-    if (b->scr.h == p->scr.h && b->scr.w == p->scr.w)
-        return;
 
     {NVGcolor src = nvgRGBA(255,255,255, 32);
     NVGcolor dst = nvgRGBA(0,0,0, 32);
