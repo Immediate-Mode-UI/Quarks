@@ -611,7 +611,6 @@ api void box_layout(struct box *b, int pad);
 /* id */
 api void pushid(struct state *s, unsigned id);
 api uiid genid(struct state *s);
-api mid convid(uiid id);
 api void popid(struct state *s);
 
 /* utf-8 */
@@ -4959,37 +4958,45 @@ overlap_box_end(struct state *s, struct overlap_box *obx)
 api void
 overlap_box_layout(struct box *b, struct memory_arena *arena)
 {
-#if 0
+    int i = 0;
+    int slot_cnt = 0;
     struct box **boxes = 0;
     struct list_hook *it = 0;
-    int i, p = 0, max = 0;
-
-    struct obx_slot {
-        uiid id;
-        int *zorder;
-        struct box *b;
-    };
+    struct temp_memory tmp;
 
     /* find maximum zorder */
     struct overlap_box obx;
+    tmp = temp_memory_begin(arena);
     obx = overlap_box_ref(b);
-    for (i = 0, p = 2; i < *obx.cnt; ++i, p += 2) {
-        int slot_zorder = *widget_get_int(b, p + 1);
-        max = max(slot_zorder, max);
-    }
-
-    /* allocate and setup temp array for sorting */
-    boxes = arena_push_array(arena, max, struct box*);
     list_foreach(it, &b->lnks) {
         struct box *n = list_entry(it, struct box, node);
-
+        int slot_zorder = *widget_get_int(n, 1);
+        slot_cnt = max(slot_zorder, slot_cnt);
     }
-#endif
+    /* allocate and setup temp sorting array */
+    boxes = arena_push_array(arena, slot_cnt + 1, struct box*);
+    list_foreach(it, &b->lnks) {
+        struct box *n = list_entry(it, struct box, node);
+        int zorder = *widget_get_int(n, 1);
+        if (!zorder) continue;
+        list_del(&b->node);
+        boxes[zorder] = n;
+    }
+    /* add boxes back in sorted order */
+    for (i = slot_cnt; i > 0; --i) {
+        if (!boxes[i-1]) continue;
+        list_add_head(&b->lnks, &boxes[i]->node);
+    } i = 1;
+    /* set correct zorder for each child box */
+    list_foreach(it, &b->lnks) {
+        struct box *n = list_entry(it, struct box, node);
+        int *zorder = widget_get_int(n, 1);
+        *zorder = i++;
+    } temp_memory_end(tmp);
 }
 api void
 overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
 {
-#if 0
     int i = 0;
     struct box *slot = 0;
     if (evt->type != EVT_CLICKED) return;
@@ -5024,10 +5031,7 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
         if (*slot_zorder > zorder)
             *slot_zorder -= 1;
     }} overlap_box_layout(b, arena);
-#endif
 }
-
-
 /* ===========================================================================
  *
  *                                  APP
