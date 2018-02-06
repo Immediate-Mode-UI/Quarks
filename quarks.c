@@ -3615,16 +3615,30 @@ scroll_input(struct box *b, const union event *evt)
 {
     struct box *p = b->parent;
     struct scroll scrl = scroll_ref(b);
-    if (b->id != scrl.cid) return;
-    if (evt->type != EVT_MOVED)
-        return;
+    switch (evt->type) {
+    case EVT_CLICKED: {
+        if (b->id == scrl.cid) break;
+        {struct list_hook *h = list_begin(&b->lnks);
+        struct box *cursor = list_entry(h, struct box, node);
+        int off_x = (evt->clicked.x - b->x) - floori(*scrl.size_x)/2;
+        int off_y = (evt->clicked.y - b->y) - floori(*scrl.size_y)/2;
 
-    {int scrl_x = b->x - p->x, scrl_y = b->y - p->y;
-    float scrl_rx = cast(float, scrl_x) / cast(float, p->w);
-    float scrl_ry = cast(float, scrl_y) / cast(float, p->h);
-    *scrl.off_x = clamp(0, scrl_rx * *scrl.total_x, *scrl.total_x - *scrl.size_x);
-    *scrl.off_y = clamp(0, scrl_ry * *scrl.total_y, *scrl.total_y - *scrl.size_y);}
-    p->moved = 1;
+        cursor->x = b->x + clamp(0, off_x, ceili(*scrl.total_x - *scrl.size_x));
+        cursor->y = b->y + clamp(0, off_y, ceili(*scrl.total_y - *scrl.size_y));
+        p = b, b = cursor;}
+    } /* ---- fallthrough ---- */
+    case EVT_MOVED: {
+        if (b->id != scrl.cid) break;
+        /* calculate scroll ratio from cursor position */
+        {int scrl_x = b->x - p->x, scrl_y = b->y - p->y;
+        float scrl_rx = cast(float, scrl_x) / cast(float, p->w);
+        float scrl_ry = cast(float, scrl_y) / cast(float, p->h);
+
+        /* validate and set cursor position */
+        *scrl.off_x = clamp(0, scrl_rx * *scrl.total_x, *scrl.total_x - *scrl.size_x);
+        *scrl.off_y = clamp(0, scrl_ry * *scrl.total_y, *scrl.total_y - *scrl.size_y);}
+        p->moved = 1;
+    } break;}
 }
 /* ---------------------------------------------------------------------------
  *                                  COMBO
@@ -4511,20 +4525,24 @@ scroll_box_input(struct context *ctx, struct box *b, union event *evt)
     struct scroll y = scroll_ref(by);
     struct scroll_region sr = scroll_region_ref(bsr);
 
-    if (evt->type == EVT_MOVED) {
+    switch (evt->type) {
+    case EVT_CLICKED:
+    case EVT_MOVED: {
         /* scrollbars */
         if (bx->moved) *sr.off_x = *x.off_x;
         if (by->moved) *sr.off_y = *y.off_y;
-    } else if (evt->type == EVT_DRAG_END) {
+    } break;
+    case EVT_DRAG_END: {
         /* overscrolling */
         *sr.off_x = clamp(0, *sr.off_x, *x.total_x - *x.size_x);
         *sr.off_y = clamp(0, *sr.off_y, *y.total_y - *y.size_y);
-    }
-    if (evt->type == EVT_SCROLLED) {
+    } break;
+    case EVT_SCROLLED: {
         /* mouse scrolling */
         *sr.off_y += -evt->scroll.y * floori((cast(float, *y.size_y) * 0.1f));
         *sr.off_y = clamp(0, *sr.off_y, *y.total_y - *y.size_y);
-    } else if (evt->type == EVT_SHORTCUT) {
+    } break;
+    case EVT_SHORTCUT: {
         /* shortcuts */
         if (evt->key.code == SHORTCUT_SCROLL_BOX_BEGIN)
             if (evt->key.pressed) *sr.off_y = 0;
@@ -4534,7 +4552,7 @@ scroll_box_input(struct context *ctx, struct box *b, union event *evt)
             if (evt->key.pressed) *sr.off_y = min(*sr.off_y + *y.size_y, *y.total_y - *y.size_y);
         if (evt->key.code == SHORTCUT_SCROLL_BOX_PGUP)
             if (evt->key.pressed) *sr.off_y = max(*sr.off_y - *y.size_y, 0);
-    }
+    } break;}
 }
 /* ---------------------------------------------------------------------------
  *                              SCALER BOX
