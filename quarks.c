@@ -202,6 +202,7 @@ struct box {
     int dw,dh;
 
     /* state */
+    unsigned hovered:1;
     unsigned clicked:1;
     unsigned pressed:1;
     unsigned released:1;
@@ -2081,6 +2082,7 @@ process_begin(struct context *ctx, unsigned flags)
                     for (i = 0; i < r->boxcnt; ++i) {
                         /* reset box input state */
                         struct box *b = r->boxes + i;
+                        b->hovered = 0;
                         b->entered = b->exited = 0;
                         b->drag_end = b->moved = 0;
                         b->pressed = b->released = 0;
@@ -2449,6 +2451,7 @@ process_begin(struct context *ctx, unsigned flags)
             struct box *last = ctx->hot;
             ctx->hot = at(ctx->tree, mx, my);
             if (ctx->hot != last) {
+                /* hot - entered, exited */
                 union event *evt;
                 struct box *prev = last;
                 struct box *cur = ctx->hot;
@@ -2651,6 +2654,13 @@ process_begin(struct context *ctx, unsigned flags)
                 event_add_box(evt, a);
             event_end(evt);
         }
+        /* hovered */
+        {struct box *h = ctx->hot;
+        int mx = in->mouse.x, my = in->mouse.y;
+        do if (inbox(mx, my, h->x, h->y, h->w, h->h))
+            h->hovered = 1;
+        while ((h = h->parent));}
+
         /* state transition table */
         if (ctx->unbalanced && (flags & PROCESS_BLUEPRINT))
             ctx->state = STATE_BLUEPRINT;
@@ -3271,6 +3281,9 @@ enum widget_shortcuts {
     SHORTCUT_SCROLL_BOX_PGDN,
     SHORTCUT_SCROLL_BOX_PGUP,
     SHORTCUT_SCROLL_BOX_END,
+    SHORTCUT_SCALER_BOX_SCALE_X,
+    SHORTCUT_SCALER_BOX_SCALE_Y,
+    SHORTCUT_SCALER_BOX_SCALE,
     SHORTCUT_INTERNAL_END
 };
 enum icon_symbol {
@@ -3991,6 +4004,7 @@ grid_box_blueprint(struct box *b)
     struct list_hook *it;
     int cols = 0, rows = 0;
     struct grid_box gbx = grid_box_ref(b);
+    b->dw = b->dh = 0;
     box_blueprint(b, 0, 0); /* calulate max cell size */
     list_foreach(it, &b->lnks) {
         /* find number of columns and rows */
@@ -4268,7 +4282,8 @@ flex_box_layout(struct box *b)
             case FLEX_BOX_SLOT_FITTING: sb->w = slot_pix; break;
             case FLEX_BOX_SLOT_VARIABLE:
                 sb->w = (slot_pix > var) ? slot_pix: var; break;
-            } pos += sb->w + *fbx.spacing;
+            } pos += sb->w;
+            b->w = (pos + *fbx.padding) - b->x;
         } break;
         case FLEX_BOX_VERTICAL: {
             sb->y = pos;
@@ -4278,8 +4293,10 @@ flex_box_layout(struct box *b)
             case FLEX_BOX_SLOT_FITTING: sb->h = slot_pix; break;
             case FLEX_BOX_SLOT_VARIABLE:
                 sb->h = (slot_pix > var) ? slot_pix: var; break;
-            } pos += sb->h + *fbx.spacing;
+            } pos += sb->h;
+            b->h = (pos + *fbx.padding) - b->y;
         } break;}
+        pos += *fbx.spacing;
     }
 }
 /* ---------------------------------------------------------------------------
@@ -4519,6 +4536,65 @@ scroll_box_input(struct context *ctx, struct box *b, union event *evt)
         if (evt->key.code == SHORTCUT_SCROLL_BOX_PGUP)
             if (evt->key.pressed) *sr.off_y = max(*sr.off_y - *y.size_y, 0);
     }
+}
+/* ---------------------------------------------------------------------------
+ *                              SCALER BOX
+ * --------------------------------------------------------------------------- */
+struct scaler_box {
+    uiid id;
+    float *scale_x;
+    float *scale_y;
+};
+api struct scaler_box
+scaler_box_ref(struct box *b)
+{
+    struct scaler_box sb;
+    sb.scale_x = widget_get_float(b, 0);
+    sb.scale_y = widget_get_float(b, 1);
+    sb.id = *widget_get_id(b, 2);
+    return sb;
+}
+api struct scaler_box
+scaler_box_begin(struct state *s)
+{
+    struct scaler_box sb = {0};
+    assert(s);
+    if (!s) return sb;
+
+    widget_begin(s, WIDGET_SCALER_BOX);
+    sb.scale_x = widget_state_float(s, WIDGET_SCALER_BOX, 1);
+    sb.scale_y = widget_state_float(s, WIDGET_SCALER_BOX, 1);
+    sb.id = widget_box_push(s);
+    widget_param_id(s, sb.id);
+    return sb;
+}
+api void
+scaler_box_end(struct state *s)
+{
+    uiid id = 0;
+    assert(s);
+    if (!s) return;
+
+    id = widget_box_push(s);
+    widget_param_id(s, id);
+    widget_box_property_set(s, BOX_IMMUTABLE);
+
+    widget_box_pop(s);
+    widget_box_pop(s);
+    widget_end(s);
+}
+api void
+scaler_box_input(struct box *b, union event *evt)
+{
+    struct input *in = evt->hdr.input;
+    struct scaler_box sb = scaler_box_ref(b);
+    if (evt->type != EVT_SCROLLED) return;
+    if (in->shortcuts[SHORTCUT_SCALER_BOX_SCALE_X].down ||
+        in->shortcuts[SHORTCUT_SCALER_BOX_SCALE].down)
+        *sb.scale_x = -evt->scroll.x * 0.1f;
+    if (in->shortcuts[SHORTCUT_SCALER_BOX_SCALE_Y].down ||
+        in->shortcuts[SHORTCUT_SCALER_BOX_SCALE].down)
+        *sb.scale_y = -evt->scroll.y * 0.1f;
 }
 /* ---------------------------------------------------------------------------
  *                              BUTTON_ICON
@@ -4876,6 +4952,7 @@ window_begin(struct state *s, const char *title)
     widget_begin(s, WIDGET_WINDOW);
     win.id = widget_box_push(s);
 
+    /* panel */
     win.panel = panel_begin(s);
     win.fbx = flex_box_begin(s);
     *win.fbx.padding = 0;
@@ -4999,7 +5076,8 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
 {
     int i = 0;
     struct box *slot = 0;
-    if (evt->type != EVT_CLICKED) return;
+    if (evt->type != EVT_CLICKED)
+        return;
 
     /* find clicked on slot */
     for (i = 0; i < evt->hdr.cnt; ++i) {
@@ -5019,13 +5097,13 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
     for (i = 0, p = 1; i < *obx.cnt; ++i, p += 2) {
         uiid slot_id = *widget_get_id(b, p);
         int *slot_zorder = widget_get_int(b, p + 1);
-        if (slot_id != slot->id)
-            continue;
+        if (slot_id != slot->id) continue;
 
         zorder = *slot_zorder;
         *slot_zorder = *obx.cnt + 1;
         break;
     }
+    /* set each slots zorder */
     for (i = 0, p = 2; i < *obx.cnt; ++i, p += 2) {
         int *slot_zorder = widget_get_int(b, p);
         if (*slot_zorder > zorder)
@@ -5171,6 +5249,8 @@ nvgButton(struct NVGcontext *vg, struct box *b, NVGcolor col)
     nvgBeginPath(vg);
     nvgRoundedRect(vg, b->x+1,b->y+1, b->w-2,b->h-2, corner_radius-1);
     if (!is_black(col)) {
+        if (b->hovered)
+            col.a = 0.9f;
         nvgFillColor(vg, col);
         nvgFill(vg);
     }
@@ -5215,7 +5295,9 @@ nvgSlider(struct NVGcontext *vg, struct box *b)
 
     nvgBeginPath(vg);
     nvgRect(vg, b->x, b->y, b->w, b->h);
-    nvgFillColor(vg, nvgRGBA(128,16,8,255));
+    if (b->hovered)
+        nvgFillColor(vg, nvgRGBA(128,16,8,230));
+    else nvgFillColor(vg, nvgRGBA(128,16,8,255));
     nvgFill(vg);
     nvgFillPaint(vg, knob);
     nvgFill(vg);
@@ -5234,20 +5316,24 @@ nvgScroll(struct NVGcontext *vg, struct box *b)
     struct scroll scrl = scroll_ref(b);
     if (scrl.cid != b->id) return;
     if (b->h == p->h && b->w == p->w)
-        return;
+        return; /* skip if fully visible */
 
+    /* draw scroll background  */
     pt = nvgBoxGradient(vg, p->x, p->y, p->w, p->h, 3,4, nvgRGBA(0,0,0,32), nvgRGBA(0,0,0,92));
     nvgBeginPath(vg);
     nvgRoundedRect(vg, p->x, p->y, p->w, p->h, 3);
     nvgFillPaint(vg, pt);
     nvgFill(vg);
 
+    /* draw scroll cursor  */
     {NVGcolor src = nvgRGBA(255,255,255, 32);
     NVGcolor dst = nvgRGBA(0,0,0, 32);
     pt = nvgLinearGradient(vg, b->x, b->y, b->x, b->y + b->h, src, dst);}
     nvgBeginPath(vg);
     nvgRoundedRect(vg, b->x, b->y, b->w, b->h, 3);
-    nvgFillColor(vg, nvgRGBA(128,16,8,255));
+    if (b->hovered)
+        nvgFillColor(vg, nvgRGBA(128,16,8,230));
+    else nvgFillColor(vg, nvgRGBA(128,16,8,255));
     nvgFill(vg);
     nvgFillPaint(vg, pt);
     nvgFill(vg);
@@ -5300,6 +5386,28 @@ nvgClipRegion(struct NVGcontext *vg, struct box *b, int pidx, struct rect *sis)
         nvgScissor(vg, b->x, b->y, b->w, b->h);
         sis->x = b->x, sis->y = b->y;
         sis->w = b->w, sis->h = b->h;
+    }
+}
+api void
+nvgScaleRegion(struct NVGcontext *vg, struct box *b, float *x, float *y)
+{
+    struct scaler_box sbx = scaler_box_ref(b);
+    if (b->id != sbx.id) {
+        float xform[6];
+        *x *= *sbx.scale_x;
+        *y *= *sbx.scale_y;
+        /* scale all content */
+        nvgTransformIdentity(xform);
+        nvgTransformScale(xform, *x, *y);
+        nvgCurrentTransform(vg, xform);
+    } else {
+        float xform[6];
+        *x /= *sbx.scale_x;
+        *y /= *sbx.scale_y;
+        /* reset scaler */
+        nvgTransformIdentity(xform);
+        nvgTransformScale(xform, *x, *y);
+        nvgCurrentTransform(vg, xform);
     }
 }
 api void
@@ -5419,6 +5527,7 @@ ui_update(struct NVGcontext *vg, struct context *ctx)
                     case WIDGET_SCROLL: scroll_input(b, evt); break;
                     case WIDGET_SCROLL_REGION: scroll_region_input(b, evt); break;
                     case WIDGET_SCROLL_BOX: scroll_box_input(ctx, b, evt); break;
+                    case WIDGET_SCALER_BOX: scaler_box_input(b, evt); break;
                     default: input(p, evt, b); break;}
                 }
             }
@@ -5435,9 +5544,11 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
     assert(ctx);
     if (!ctx || !vg) return;
 
+    /* Process: Paint */
     while ((p = process_begin(ctx, PROCESS_PAINT))) {
         struct process_paint *op = &p->paint;
         struct rect scissor = {0,0,0,0};
+        float scale_x = 1.0f, scale_y = 1.0f;
         scissor.w = w, scissor.h = h;
         for (i = 0; i < op->cnt; ++i) {
             struct box *b = op->boxes[i];
@@ -5450,6 +5561,7 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
             case WIDGET_SCROLL: nvgScroll(vg, b); break;
             case WIDGET_CLIP_BOX: nvgClipRegion(vg, b, 0, &scissor); break;
             case WIDGET_SCROLL_REGION: nvgClipRegion(vg, b, 4, &scissor); break;
+            case WIDGET_SCALER_BOX: nvgScaleRegion(vg, b, &scale_x, &scale_y);
             case WIDGET_PANEL: nvgPanel(vg, b); break;
             case WIDGET_PANEL_HEADER: nvgPanelHeader(vg, b); break;
             default: break;}
@@ -5553,13 +5665,13 @@ ui_event(struct context *ctx, const SDL_Event *evt)
  *                                  Main
  *
  * =========================================================================== */
-enum fonts {
-    FONT_HL,
-    FONT_ICONS,
-    FONT_CNT
-};
 int main(void)
 {
+    enum fonts {
+        FONT_HL,
+        FONT_ICONS,
+        FONT_CNT
+    };
     int quit = 0;
     int fnts[FONT_CNT];
     struct context *ctx;
@@ -5583,6 +5695,7 @@ int main(void)
     fnts[FONT_ICONS] = nvgCreateFont(vg, "icons", "icons.ttf");
     default_icon_font = fnts[FONT_ICONS];
 
+    /* GUI */
     {struct config cfg;
     cfg.font_default_id = fnts[FONT_HL];
     cfg.font_default_height = 16;
@@ -5590,6 +5703,7 @@ int main(void)
 
     input_resize(ctx, 1000, 600);
     while (!quit) {
+        /* Input */
         SDL_Event evt;
         while (SDL_PollEvent(&evt)) {
             switch (evt.type) {
@@ -5599,7 +5713,7 @@ int main(void)
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
-            sbox_begin(s, 200, 300); {
+            sbox_begin(s, 200, 250); {
                 struct window w = window_begin(s, "Demo"); {
                    struct flex_box fbx = flex_box_begin(s);
                     *fbx.orientation = FLEX_BOX_VERTICAL;
