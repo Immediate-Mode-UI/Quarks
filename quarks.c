@@ -4393,7 +4393,6 @@ scroll_region_input(struct box *b, const union event *evt)
 {
     struct input *in = evt->hdr.input;
     struct scroll_region sr = scroll_region_ref(b);
-    if (evt->hdr.origin != b) return;
     if (evt->type == EVT_DRAGGED && in->shortcuts[SHORTCUT_SCROLL_REGION_SCROLL].down) {
         b->moved = 1;
         switch (*sr.dir) {
@@ -5168,7 +5167,7 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
 #include "nanovg/src/nanovg.c"
 #include "nanovg/src/nanovg_gl.h"
 
-#include "icons.h"
+#include "IconsFontAwesome.h"
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__) || defined(__GNUG__)
@@ -5176,8 +5175,8 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
 #endif
 
 /* Hacks:
- * To lazy to write complete gui render context with icon and image declaration,
- * font and style tables addressable by index, etc ....
+ * To lazy to write complete gui render context on top of NanoVG with icon and
+ * image declaration and font,style tables addressable by index, etc ....
  */
 static int default_icon_font;
 enum icons {
