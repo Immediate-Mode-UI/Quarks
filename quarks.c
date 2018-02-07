@@ -29,10 +29,11 @@
 #define containerof(ptr,type,member) (type*)((void*)((char*)(1?(ptr):&((type*)0)->member)-offsof(type, member)))
 #define alignof(t) ((int)((char*)(&((struct {char c; t _h;}*)0)->_h) - (char*)0))
 #define align(x,mask) ((void*)(((intptr_t)((const char*)(x)+(mask-1))&~(mask-1))))
+#define isaligned(x,mask) (!((uintptr_t)(x) & (mask-1)))
+#define type_aligned(x,t) isaligned(x, alignof(t))
 #define between(x,a,b) ((a)<=(x) && (x)<=(b))
 #define inbox(px,py,x,y,w,h) (between(px,x,x+w) && between(py,y,y+h))
 #define intersect(x,y,w,h,X,Y,W,H) ((x)<(X)+(W) && (x)+(w)>(X) && (y)<(Y)+(H) && (y)+(h)>(Y))
-
 #define stringify(x) #x
 #define stringifyi(x) stringifyi(x)
 #define strjoini(a, b) a ## b
@@ -537,7 +538,7 @@ struct context {
 };
 /* context */
 api struct context *create(const struct allocator *a, const struct config *cfg);
-api void init(struct context *ctx, const struct allocator *a, const struct config *cfg);
+api int init(struct context *ctx, const struct allocator *a, const struct config *cfg);
 api void reset(struct context *ctx);
 api void destroy(struct context *ctx);
 
@@ -885,7 +886,11 @@ utf_at(unsigned long *rune, int *rune_len,
     const char *s, int len, int idx)
 {
     int runes = 0;
-    if (!s) return 0;
+    assert(s);
+    assert(rune);
+    assert(rune_len);
+
+    if (!s || !rune || !rune_len) return 0;
     while ((*rune_len = utf_decode(rune, s, len))) {
         if (runes++ == idx) return s;
         len = max(0, len - *rune_len);
@@ -982,12 +987,17 @@ intern struct memory_block*
 block_alloc(struct block_allocator *a, int blksz)
 {
     struct memory_block *blk = 0;
+    assert(a);
+    assert(a->mem);
+    assert(a->mem->alloc);
+
     blksz = max(blksz, DEFAULT_MEMORY_BLOCK_SIZE);
     if (blksz == DEFAULT_MEMORY_BLOCK_SIZE && !list_empty(&a->freelist)) {
         /* allocate from freelist */
         blk = list_entry(a->freelist.next, struct memory_block, hook);
         list_del(&blk->hook);
     } else blk = qalloc(a->mem, blksz);
+    assert(blk);
 
     /* setup block */
     zero(blk, szof(*blk));
@@ -1015,6 +1025,10 @@ intern void
 free_blocks(struct block_allocator *a)
 {
     struct list_hook *i, *n = 0;
+    assert(a);
+    assert(a->mem);
+    assert(a->mem->alloc);
+
     list_foreach_s(i, n, &a->freelist) {
         struct memory_block *blk = 0;
         blk = list_entry(i, struct memory_block, hook);
@@ -1042,6 +1056,7 @@ arena_push(struct memory_arena *a, int cnt, int size, int align)
         {int minsz = cnt*size + szof(struct memory_block) + align;
         int blksz = max(minsz, DEFAULT_MEMORY_BLOCK_SIZE);
         struct memory_block *blk = block_alloc(a->mem, blksz);
+        assert(blk);
 
         blk->prev = a->blk;
         a->blk = blk;
@@ -1067,6 +1082,7 @@ arena_free_last_blk(struct memory_arena *a)
 intern void
 arena_clear(struct memory_arena *a)
 {
+    assert(a);
     if (!a) return;
     while (a->blk)
         arena_free_last_blk(a);
@@ -1075,6 +1091,7 @@ intern struct temp_memory
 temp_memory_begin(struct memory_arena *a)
 {
     struct temp_memory res;
+    assert(a);
     res.used = a->blk ? a->blk->used: 0;
     res.blk = a->blk;
     res.arena = a;
@@ -1085,6 +1102,7 @@ intern void
 temp_memory_end(struct temp_memory tmp)
 {
     struct memory_arena *a = tmp.arena;
+    assert(a);
     while (a->blk != tmp.blk)
         arena_free_last_blk(a);
     if (a->blk) a->blk->used = tmp.used;
@@ -1135,8 +1153,11 @@ intern union param*
 op_add(struct state *s, const union param *p, int cnt)
 {
     int i = 0;
-    struct param_buffer *ob = s->opbuf;
+    assert(s && p);
+    assert(cnt > 0);
     assert(cnt < MAX_OPS-2);
+
+    {struct param_buffer *ob = s->opbuf;
     if ((s->op_idx + cnt) >= (MAX_OPS-2)) {
         struct param_buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
@@ -1147,34 +1168,41 @@ op_add(struct state *s, const union param *p, int cnt)
     } assert(s->op_idx + cnt < (MAX_OPS-2));
     for (i = 0; i < cnt; ++i)
         ob->ops[s->op_idx++] = p[i];
-    return ob->ops + (s->op_idx - cnt);
+    return ob->ops + (s->op_idx - cnt);}
 }
 intern const char*
 store(struct state *s, const char *str, int len)
 {
     int off = 0;
-    struct buffer *ob = s->buf;
+    assert(s && str);
+    assert(s->buf);
     assert(len < MAX_STR_BUF-1);
+
+    {struct buffer *ob = s->buf;
     if ((s->buf_off + len) > MAX_STR_BUF-1) {
         struct buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
         s->buf_off = 0;
         ob->next = b;
         s->buf = ob = b;
-    } copy(ob->buf + s->buf_off, str, len);
+    }
+    assert((s->buf_off + len) <= MAX_STR_BUF-1);
+    copy(ob->buf + s->buf_off, str, len);
 
     off = s->buf_off;
     ob->buf[s->buf_off + len] = 0;
     s->total_buf_size += len + 1;
     s->buf_off += len + 1;
-    return ob->buf + off;
+    return ob->buf + off;}
 }
 api void
 pushid(struct state *s, unsigned id)
 {
     struct idrange *idr = 0;
     assert(s);
-    if (!s) return;
+    assert(s->stkcnt < cntof(s->idstk));
+    if (!s || s->stkcnt >= cntof(s->idstk))
+        return;
 
     idr = &s->idstk[s->stkcnt++];
     idr->base = id;
@@ -1239,7 +1267,7 @@ find(struct repository *repo, uiid id)
 api struct box*
 poll(struct state *s, uiid id)
 {
-    struct repository *repo;
+    struct repository *repo = 0;
     repo = s->repo;
     if (!repo) return 0;
     return find(repo, id);
@@ -1268,6 +1296,8 @@ module_begin(struct context *ctx, mid id,
     s = state_find(ctx, id);
     if (s) {s->op_idx -= 2; return s;}
     s = arena_push_type(&ctx->arena, struct state);
+    assert(s);
+    if (!s) return 0;
 
     /* setup state */
     s->id = id;
@@ -1448,7 +1478,9 @@ api void
 slot(struct state *s, uiid id)
 {
     assert(s);
-    if (!s) return;
+    assert(s->wtop > 0);
+    if (!s || s->wtop <= 0) return;
+
     {union param p[4];
     widget_begin(s, WIDGET_SLOT);
     p[0].op = OP_BOX_PUSH;
@@ -1463,12 +1495,12 @@ widget_begin(struct state *s, int type)
 {
     assert(s);
     if (!s) return;
-
     {union param p[3], *q;
     p[0].op = OP_WIDGET_BEGIN;
     p[1].type = type;
     p[2].i = 0;
     q = op_add(s, p, cntof(p));
+    assert(q);
 
     assert(s->wtop < cntof(s->wstk));
     s->wstk[s->wtop].id = genid(s);
@@ -1524,6 +1556,7 @@ intern union param*
 widget_push_param(struct state *s, union param *p)
 {
     struct widget *w = 0;
+    assert(s->wtop > 0);
     w = &s->wstk[s->wtop-1];
     *w->argc +=1 ; s->argcnt++;
     return op_add(s, p, 2);
@@ -1597,8 +1630,10 @@ widget_param_str(struct state *s, const char *str, int len)
 api float*
 widget_modifier_float(struct state *s, float *f)
 {
-    assert(s);
-    assert(f);
+    assert(s && f);
+    assert(s->ctx);
+    assert(s->ctx->active);
+    assert(s->wtop > 0);
     assert(s->ctx);
     if (!s || !f) return 0;
 
@@ -1614,8 +1649,10 @@ widget_modifier_float(struct state *s, float *f)
 api int*
 widget_modifier_int(struct state *s, int *i)
 {
-    assert(s);
-    assert(i);
+    assert(s && i);
+    assert(s->ctx);
+    assert(s->ctx->active);
+    assert(s->wtop > 0);
     assert(s->ctx);
     if (!s || !i) return 0;
 
@@ -1631,8 +1668,10 @@ widget_modifier_int(struct state *s, int *i)
 api unsigned*
 widget_modifier_uint(struct state *s, unsigned *u)
 {
-    assert(s);
-    assert(u);
+    assert(s && u);
+    assert(s->ctx);
+    assert(s->ctx->active);
+    assert(s->wtop > 0);
     assert(s->ctx);
     if (!s || !u) return 0;
 
@@ -1665,7 +1704,7 @@ widget_state_float(struct state *s, int type, float f)
 api int*
 widget_state_int(struct state *s, int type, int i)
 {
-    const struct box *b;
+    const struct box *b = 0;
     struct widget w;
 
     assert(s);
@@ -1716,12 +1755,14 @@ widget_state_id(struct state *s, int type, uiid u)
 intern union param*
 widget_get_param(struct box *b, int idx)
 {
+    assert(b);
     return b->params + idx;
 }
 api float*
 widget_get_float(struct box *b, int idx)
 {
     union param *p = 0;
+    assert(b);
     p = widget_get_param(b, idx);
     return &p->f;
 }
@@ -1729,6 +1770,7 @@ api int*
 widget_get_int(struct box *b, int idx)
 {
     union param *p = 0;
+    assert(b);
     p = widget_get_param(b, idx);
     return &p->i;
 }
@@ -1736,6 +1778,7 @@ api unsigned*
 widget_get_uint(struct box *b, int idx)
 {
     union param *p = 0;
+    assert(b);
     p = widget_get_param(b, idx);
     return &p->u;
 }
@@ -1743,6 +1786,7 @@ api uiid*
 widget_get_id(struct box *b, int idx)
 {
     union param *p = 0;
+    assert(b);
     p = widget_get_param(b, idx);
     return &p->id;
 }
@@ -1750,6 +1794,7 @@ api mid*
 widget_get_mid(struct box *b, int idx)
 {
     union param *p = 0;
+    assert(b);
     p = widget_get_param(b, idx);
     return &p->mid;
 }
@@ -1757,6 +1802,7 @@ api const char*
 widget_get_str(struct box *b, int idx)
 {
     union param *p = 0;
+    assert(b);
     p = widget_get_param(b, idx);
     return b->buf + p[0].i;
 }
@@ -1764,7 +1810,8 @@ api void
 widget_end(struct state *s)
 {
     assert(s);
-    if (!s) return;
+    assert(s->wtop > 0);
+    if (!s || s->wtop <= 0) return;
     {union param p[1];
     p[0].op = OP_WIDGET_END;
     op_add(s, p, cntof(p));}
@@ -1956,6 +2003,7 @@ intern struct box*
 at(struct box *b, int mx, int my)
 {
     struct list_hook *i = 0;
+    assert(b);
     r:list_foreach_rev(i, &b->lnks) {
         struct box *sub = list_entry(i, struct box, node);
         if ((sub->flags & BOX_IMMUTABLE) || (sub->flags & BOX_HIDDEN)) continue;
@@ -1969,6 +2017,8 @@ at(struct box *b, int mx, int my)
 intern void
 event_add_box(union event *evt, struct box *box)
 {
+    assert(evt);
+    assert(box);
     assert(evt->hdr.cnt < evt->hdr.cap);
     if (evt->hdr.cnt >= evt->hdr.cap) return;
     evt->hdr.boxes[evt->hdr.cnt++] = box;
@@ -1977,7 +2027,10 @@ intern union event*
 event_begin(union process *p, enum event_type type, struct box *orig)
 {
     union event *res = 0;
+    assert(p);
+    assert(orig);
     res = arena_push_type(p->hdr.arena, union event);
+    assert(res);
     list_init(&res->hdr.hook);
     list_add_tail(&p->input.evts, &res->hdr.hook);
 
@@ -2130,8 +2183,10 @@ process_begin(struct context *ctx, unsigned flags)
         struct state *s = list_entry(ctx->iter, struct state, hook);
         union process *p = &ctx->proc;
         if (!p->mem.ptr) return p;
+        assert(p->mem.ptr);
 
         {struct module *m = cast(struct module*, p->mem.ptr);
+        assert(type_aligned(m, struct module));
         zero(m, szof(*m));
         list_init(&m->hook);
         m->id = s->id;
@@ -2250,8 +2305,10 @@ process_begin(struct context *ctx, unsigned flags)
                 /* find child module */
                 struct repository *crepo = 0;
                 struct module *cm = module_find(ctx, op[1].mid);
+                assert(cm);
                 if (!cm || !cm->root) break;
                 crepo = cm->repo[cm->repoid];
+                assert(crepo);
                 if (!crepo) break;
 
                 /* link referenced module root box into current box in module */
@@ -2270,6 +2327,7 @@ process_begin(struct context *ctx, unsigned flags)
             case OP_BUF_CONECT: {
                 /* setup lifetime connection */
                 struct module *pm = module_find(ctx, op[1].mid);
+                assert(pm);
                 if (!pm) break;
                 m->owner = pm;
                 m->rel = (enum relationship)op[2].i;
@@ -2368,12 +2426,14 @@ process_begin(struct context *ctx, unsigned flags)
             } break;
             /* -------------------------- Properties -------------------------*/
             case OP_PROPERTY_SET: {
-                struct box *b = boxstk[depth-1];
-                b->flags |= op[1].u;
+                assert(depth > 0);
+                {struct box *b = boxstk[depth-1];
+                b->flags |= op[1].u;}
             } break;
             case OP_PROPERTY_CLR: {
-                struct box *b = boxstk[depth-1];
-                b->flags &= ~op[1].u;
+                assert(depth > 0);
+                {struct box *b = boxstk[depth-1];
+                b->flags &= ~op[1].u;}
             } break;}
             op += opdefs[op[0].op].argc + 1;
         } eol0:;}
@@ -2396,8 +2456,10 @@ process_begin(struct context *ctx, unsigned flags)
                 jmpto(ctx, STATE_LAYOUTING);
             else jmpto(ctx, STATE_DONE);
         } m = list_entry(ctx->iter, struct module, hook);
+        assert(m);
         r = m->repo[m->repoid];
 
+        assert(r);
         operation_begin(p, PROC_BLUEPRINT, ctx, &ctx->arena);
         p->layout.repo = r;
         p->layout.end = p->layout.inc = -1;
@@ -2422,8 +2484,10 @@ process_begin(struct context *ctx, unsigned flags)
                 jmpto(ctx, STATE_SERIALIZE);
             else jmpto(ctx, STATE_DONE);
         } m = list_entry(ctx->iter, struct module, hook);
+        assert(m);
         r = m->repo[m->repoid];
 
+        assert(r);
         operation_begin(p, PROC_LAYOUT, ctx, &ctx->arena);
         p->layout.end = max(0,r->boxcnt);
         p->layout.begin = 0, p->layout.inc = 1;
@@ -2736,6 +2800,8 @@ process_begin(struct context *ctx, unsigned flags)
         struct list_hook *si = 0;
         union process *p = &ctx->proc;
         FILE *fp = p->serial.file;
+        assert(fp);
+
         list_foreach(si, &ctx->states) {
             /* iterate all module */
             struct state *s = list_entry(si, struct state, hook);
@@ -2771,6 +2837,7 @@ process_begin(struct context *ctx, unsigned flags)
         union process *p = &ctx->proc;
         FILE *fp = p->serial.file;
         struct list_hook *si = 0;
+        assert(fp);
 
         list_foreach(si, &ctx->states) {
             struct state *s = list_entry(si, struct state, hook);
@@ -2810,6 +2877,7 @@ process_begin(struct context *ctx, unsigned flags)
             const struct repository *r = m->repo[m->repoid];
             if (!m->id) continue; /* skip root */
 
+            assert(fp);
             fprintf(fp, "const struct element g_%u_elements[] = {\n", m->id);
             for (i = 0; i < r->boxcnt; ++i) {
                 const struct box *b = r->boxes + i;
@@ -2906,6 +2974,7 @@ process_begin(struct context *ctx, unsigned flags)
             } m = list_entry(ctx->iter, struct module, hook);
         } while (!m->repo[!m->repoid]);
 
+        assert(m->repo[!m->repoid]);
         operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
         p->mem.ptr = m->repo[!m->repoid];
         m->repo[!m->repoid] = 0;
@@ -2959,6 +3028,10 @@ process_begin(struct context *ctx, unsigned flags)
 api void
 process_end(union process *p)
 {
+    assert(p);
+    assert(p->hdr.ctx);
+    if (!p) return;
+
     switch (p->type) {
     case PROC_INPUT: {
         struct context *ctx = p->hdr.ctx;
@@ -2975,7 +3048,12 @@ process_end(union process *p)
 api void
 blueprint(union process *op, struct box *b)
 {
-    struct context *ctx = op->hdr.ctx;
+    assert(b);
+    assert(op);
+    assert(op->hdr.ctx);
+    if (!b || !op) return;
+
+    {struct context *ctx = op->hdr.ctx;
     if (b->type & WIDGET_INTERNAL_BEGIN) {
         switch (b->type) {
         case WIDGET_ROOT: {
@@ -2986,7 +3064,7 @@ blueprint(union process *op, struct box *b)
         case WIDGET_SLOT: {
             box_blueprint(b,0,0);
         } break;}
-    } else box_blueprint(b,0,0);
+    } else box_blueprint(b,0,0);}
 }
 intern void
 layout_default(struct box *b)
@@ -3002,7 +3080,12 @@ layout_default(struct box *b)
 api void
 layout(union process *op, struct box *b)
 {
-    struct context *ctx = op->hdr.ctx;
+    assert(b);
+    assert(op);
+    assert(op->hdr.ctx);
+    if (!b || !op) return;
+
+    {struct context *ctx = op->hdr.ctx;
     if (!(b->type & WIDGET_INTERNAL_BEGIN))
         {box_layout(b, 0); return;}
 
@@ -3030,15 +3113,21 @@ layout(union process *op, struct box *b)
                 n->h = min(n->dh, (b->y + b->h)-n->y);
             } else n->w = b->w, n->h = b->h;
         }
-    } break;}
+    } break;}}
 }
 api void
 input(union process *op, union event *evt, struct box *b)
 {
-    struct context *ctx = op->hdr.ctx;
+    assert(b);
+    assert(op);
+    assert(evt);
+    assert(op->hdr.ctx);
+    if (!b || !evt || !op) return;
+
     if (!(b->type & WIDGET_INTERNAL_BEGIN)) return;
     switch (b->type) {
     case WIDGET_UNBLOCKING: {
+        struct context *ctx = 0;
         struct list_hook *i = 0;
         struct box *contextual = 0;
 
@@ -3048,6 +3137,7 @@ input(union process *op, union event *evt, struct box *b)
 
         /* hide all contextual menus */
         contextual = ctx->contextual;
+        assert(contextual);
         list_foreach(i, &contextual->lnks) {
             struct box *c = list_entry(i,struct box,node);
             if (c == b) continue;
@@ -3058,15 +3148,18 @@ input(union process *op, union event *evt, struct box *b)
 api void
 reset(struct context *ctx)
 {
+    assert(ctx);
+    if (!ctx) return;
     ctx->active = ctx->boxes;
     ctx->origin = ctx->boxes;
     ctx->hot = ctx->boxes;
 }
-api void
+api int
 init(struct context *ctx, const struct allocator *a, const struct config *cfg)
 {
     assert(ctx);
-    if (!ctx) return;
+    assert(cfg);
+    if (!ctx || !cfg) return 0;
 
     memset(ctx, 0, sizeof(*ctx));
     a = (a) ? a: &default_allocator;
@@ -3106,6 +3199,7 @@ init(struct context *ctx, const struct allocator *a, const struct config *cfg)
     ctx->blocking = ctx->boxes + (WIDGET_BLOCKING - WIDGET_LAYER_BEGIN);
     ctx->ui = ctx->boxes + (WIDGET_UI - WIDGET_LAYER_BEGIN);
     reset(ctx);
+    return 1;
 }
 api struct context*
 create(const struct allocator *a, const struct config *cfg)
@@ -3113,6 +3207,8 @@ create(const struct allocator *a, const struct config *cfg)
     struct context *ctx = 0;
     a = (a) ? a: &default_allocator;
     ctx = qalloc(a, szof(*ctx));
+    assert(ctx);
+    if (!ctx) return 0;
     init(ctx, a, cfg);
     return ctx;
 }
@@ -3261,7 +3357,7 @@ enum widget_type {
     WIDGET_FLEX_BOX_SLOT,
     WIDGET_OVERLAP_BOX,
     WIDGET_OVERLAP_BOX_SLOT,
-    WIDGET_WIN_BOX,
+    WIDGET_EXPANDING_AREA,
     /* Container */
     WIDGET_COMBO,
     WIDGET_COMBO_POPUP,
@@ -3960,7 +4056,7 @@ sborder_layout(struct box *b)
         y = min(y, n->y + n->h);
     }
     b->w = x - b->x;
-    b->h = y = b->y;
+    b->h = y - b->y;
     box_pad(p, b, -*sbx.padx, -*sbx.pady);}
 }
 /* ---------------------------------------------------------------------------
@@ -5784,6 +5880,8 @@ int main(void)
         /* GUI */
         {struct state *s = 0;
         if ((s = begin(ctx, id("ui")))) {
+            struct sborder sb = sborder_begin(s);
+            *sb.padx = 100, *sb.pady = 50;
             sbox_begin(s, 180, 250); {
                 struct panel pan = panel_box_begin(s, "Demo"); {
                    struct flex_box fbx = flex_box_begin(s);
@@ -5855,6 +5953,7 @@ int main(void)
                     } flex_box_end(s, &fbx);
                 } panel_box_end(s, &pan, 0);
             } sbox_end(s);
+            sborder_end(s);
             end(s);
         }}
         /* Paint */
