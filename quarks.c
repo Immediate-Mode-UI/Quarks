@@ -1786,7 +1786,7 @@ widget_state_id(struct state *s, int type, uiid u)
         return widget_param_id(s, u);
     return widget_param_id(s, b->params[*w.argc].id);
 }
-intern union param*
+api union param*
 widget_get_param(struct box *b, int idx)
 {
     assert(b);
@@ -3408,9 +3408,8 @@ enum widget_type {
     WIDGET_FLEX_BOX_SLOT,
     WIDGET_OVERLAP_BOX,
     WIDGET_OVERLAP_BOX_SLOT,
-    WIDGET_SCONSTRAINT_CANVAS,
-    WIDGET_SCONSTRAINT_CANVAS_SLOT,
-    WIDGET_SCONDITION_CANVAS,
+    WIDGET_CON_BOX,
+    WIDGET_CON_BOX_SLOT,
     /* Container */
     WIDGET_COMBO,
     WIDGET_COMBO_POPUP,
@@ -3965,6 +3964,7 @@ sborder_layout(struct box *b)
     struct sborder sbx = sborder_ref(b);
     if (b->id != sbx.content) return;
     box_pad(b, p, *sbx.x, *sbx.y);
+    box_layout(b, 0);
 }
 /* ---------------------------------------------------------------------------
  *                                  SALIGN
@@ -3999,7 +3999,7 @@ api struct salign
 salign_begin(struct state *s)
 {
     struct salign aln;
-    widget_begin(s, WIDGET_SBORDER);
+    widget_begin(s, WIDGET_SALIGN);
     aln.vertical = widget_param_int(s, SALIGN_TOP);
     aln.horizontal = widget_param_int(s, SALIGN_LEFT);
     aln.id = widget_box_push(s);
@@ -4079,6 +4079,7 @@ salign_layout(struct box *b)
     b->w = x - b->x;
     b->h = y - b->y;
     box_pad(p, b, 0, 0);}
+    box_layout(b, 0);
 }
 /* ---------------------------------------------------------------------------
  *                                  SBOX
@@ -4101,8 +4102,8 @@ sbox_begin(struct state *s)
 api void
 sbox_end(struct state *s)
 {
-    sborder_end(s);
     salign_end(s);
+    sborder_end(s);
     widget_box_pop(s);
     widget_end(s);
 }
@@ -4589,28 +4590,235 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
     }} overlap_box_layout(b, arena);
 }
 /* ---------------------------------------------------------------------------
- *                              SCONSTRAINT
+ *                          CONSTRAINT BOX
  * --------------------------------------------------------------------------- */
-enum sconstraint_operation {
-    SCONS_OP_CPY,
-    SCONS_OP_SET,
-    SCONS_OP_MIN,
-    SCONS_OP_MAX
-};
-enum sconstraint_attribute {
-    SCONS_ATTR_T,
-    SCONS_ATTR_L,
-    SCONS_ATTR_B,
-    SCONS_ATTR_R,
-    SCONS_ATTR_CX,
-    SCONS_ATTR_CY,
-    SCONS_ATTR_W,
-    SCONS_ATTR_H
-};
-struct sconstraint_canvas {
-    uiid id;
+#define SPARENT (-1)
+enum expr_op {EXPR_AND, EXPR_OR};
+enum cond_eq {COND_EQ, COND_NE, COND_GR, COND_GE, COND_LS, COND_LE};
+enum con_eq {CON_NOP, CON_SET, CON_MIN, CON_MAX};
+enum con_attr {ATTR_NONE, ATTR_L, ATTR_T, ATTR_R, ATTR_B, ATTR_CX,
+    ATTR_CY, ATTR_W, ATTR_H, ATTR_DW, ATTR_DH};
 
+struct cons {float mul; int off;};
+struct convar {int slot; int attr;};
+struct cond {unsigned char op; struct convar a, b; struct cons cons;};
+struct con {int op; struct convar dst, src; struct cons cons; int anchor, cond;};
+
+struct con_box {
+    uiid id;
+    int *con_cnt;
+    int *cond_cnt;
+    int *slot_cnt;
+    union param *conds;
 };
+api struct con_box
+con_box_ref(struct box *b)
+{
+    struct con_box cbx = {0};
+    cbx.cond_cnt = widget_get_int(b, 0);
+    cbx.slot_cnt = widget_get_int(b, 1);
+    cbx.conds = widget_get_param(b, 2);
+    return cbx;
+}
+api struct con_box
+con_box_begin(struct state *s,
+    struct cond *conds, int cond_cnt)
+{
+    int i = 0;
+    struct con_box cbx;
+
+    /* setup con box */
+    widget_begin(s, WIDGET_CON_BOX);
+    cbx.id = widget_box_push(s);
+    cbx.cond_cnt = widget_param_int(s, cond_cnt);
+    cbx.slot_cnt = widget_param_int(s, 0);
+
+    /* push conditions */
+    for (i = 0; i < cond_cnt; ++i) {
+        const struct cond *c = conds + i;
+        widget_param_int(s, c->op);
+        widget_param_int(s, c->a.slot);
+        widget_param_int(s, c->a.attr);
+        widget_param_int(s, c->b.slot);
+        widget_param_int(s, c->b.attr);
+        widget_param_float(s, c->cons.mul);
+        widget_param_int(s, c->cons.off);
+    } return cbx;
+}
+api void
+con_box_slot(struct state *s, struct con_box *cbx,
+    const struct con *cons, int con_cnt)
+{
+    int i, idx = *cbx->slot_cnt;
+    if (idx) {
+        widget_box_pop(s);
+        widget_end(s);
+    }
+    widget_begin(s, WIDGET_CON_BOX_SLOT);
+    widget_box_push(s);
+    widget_param_int(s, con_cnt);
+    for (i = 0; i < con_cnt; ++i) {
+        const struct con *c = cons + i;
+        widget_param_int(s, c->op);
+        widget_param_int(s, c->dst.slot);
+        widget_param_int(s, c->dst.attr);
+        widget_param_int(s, c->src.slot);
+        widget_param_int(s, c->src.attr);
+        widget_param_float(s, c->cons.mul);
+        widget_param_int(s, c->cons.off);
+        widget_param_int(s, c->anchor);
+        widget_param_int(s, c->cond);
+    } *cbx->slot_cnt += 1;
+}
+api void
+con_box_end(struct state *s, struct con_box *cbx)
+{
+    int idx = *cbx->slot_cnt;
+    if (idx) {
+        widget_box_pop(s);
+        widget_end(s);
+    }
+    widget_box_pop(s);
+    widget_end(s);
+}
+intern int
+box_attr_get(const struct box *b, int attr)
+{
+    switch (attr) {
+    default: return 0;
+    case ATTR_L: return b->x;
+    case ATTR_T: return b->y;
+    case ATTR_R: return b->x + b->w;
+    case ATTR_B: return b->y + b->h;
+    case ATTR_CX: return b->x + b->w/2;
+    case ATTR_CY: return b->y + b->h/2;
+    case ATTR_W: return b->w;
+    case ATTR_H: return b->h;
+    case ATTR_DW: return b->dw;
+    case ATTR_DH: return b->dh;}
+}
+intern void
+box_attr_set(struct box *b, int attr, int anchor, int val)
+{
+    switch (attr) {
+    default: return;
+    case ATTR_L: {
+        if (anchor == ATTR_R)
+            b->w = (b->x + b->w) - val;
+        else if (anchor == ATTR_CX)
+            b->w = ((b->x + b->w/2) - val) * 2;
+        b->x = val;
+    } break;
+    case ATTR_T: {
+        if (anchor == ATTR_B)
+            b->h = (b->y + b->h) - val;
+        else if (anchor == ATTR_CY)
+            b->h = ((b->y + b->h/2) - val) * 2;
+        b->y = val;
+    } break;
+    case ATTR_R: {
+        if (anchor == ATTR_L)
+            b->w = val - b->x;
+        else if (anchor == ATTR_CX)
+            b->w = (val - (b->x + b->w/2)) * 2;
+        b->x = val - b->w;
+    } break;
+    case ATTR_B: {
+        if (anchor == ATTR_T)
+            b->h = val - b->y;
+        else if (anchor == ATTR_CY)
+            b->h = (val - (b->y + b->h/2)) * 2;
+        b->y = val - b->h;
+    } break;
+    case ATTR_CX: {
+        if (anchor == ATTR_L)
+            b->w = (val - b->x) * 2;
+        else if (anchor == ATTR_R)
+            b->w = ((b->x + b->w) - val) * 2;
+        b->x = val - b->w/2;
+    } break;
+    case ATTR_CY: {
+        if (anchor == ATTR_T)
+            b->h = (val - b->y) * 2;
+        else if (anchor == ATTR_B)
+            b->h = ((b->y + b->h) - val) * 2;
+        b->y = val - b->h/2;
+    } break;
+    case ATTR_W: b->w = val;
+    case ATTR_H: b->h = val;}
+}
+api void
+con_box_layout(struct box *b, struct memory_arena *arena)
+{
+    int j, i = 0;
+    struct list_hook *it = 0;
+    struct con_box cbx = con_box_ref(b);
+    struct temp_memory tmp = temp_memory_begin(arena);
+    int *res = arena_push_array(arena, *cbx.cond_cnt, int);
+
+    /* setup boxes into slots */
+    struct box **boxes = arena_push_array(arena, *cbx.slot_cnt, struct box*);
+    boxes[i++] = b;
+    list_foreach(it, &b->lnks)
+        boxes[i++] = list_entry(it, struct box, node);
+
+    /* evaluate conditions */
+    for (i = 0; i < *cbx.cond_cnt; ++i) {
+        int av = 0, bv = 0;
+        const struct box *dst, *src;
+        union param *p = cbx.conds + i*7;
+
+        /* condition left operand */
+        assert(p[1].i < *cbx.cond_cnt);
+        dst = boxes[p[1].i + 1];
+        av = box_attr_get(dst, p[2].i);
+
+        /* condition right operand */
+        assert(p[3].i < *cbx.cond_cnt);
+        src = boxes[p[3].i + 1];
+        bv = box_attr_get(src, p[4].i);
+
+        /* eval condition */
+        switch (p[0].i) {
+        case COND_EQ: res[i+1] = (av == bv); break;
+        case COND_NE: res[i+1] = (av != bv); break;
+        case COND_GR: res[i+1] = (av >  bv); break;
+        case COND_GE: res[i+1] = (av >= bv); break;
+        case COND_LS: res[i+1] = (av <  bv); break;
+        case COND_LE: res[i+1] = (av <= bv); break;}
+    }
+    /* evaluate constraints */
+    for (i = 0; i < *cbx.slot_cnt; ++i) {
+        struct box *slot = boxes[i+1];
+        int *con_cnt = widget_get_int(slot, 0);
+        for (j = 0; j < *con_cnt; ++j) {
+            struct box *dst, *src;
+            union param *p = widget_get_param(slot, (j * 9) + 1);
+            assert((p[8].i < *cbx.cond_cnt) || (!(*cbx.cond_cnt)));
+            if (*cbx.cond_cnt && (res[p[8].i] >= *cbx.cond_cnt))
+                continue;
+
+            /* left value */
+            {int av = 0, bv = 0, v = 0;
+            assert(p[1].i < *cbx.slot_cnt);
+            dst = boxes[p[1].i + 1];
+            av = box_attr_get(dst, p[2].i);
+
+            /* right value */
+            assert(p[3].i < *cbx.slot_cnt);
+            src = boxes[p[3].i + 1];
+            bv = box_attr_get(src, p[4].i);
+            v = roundi(cast(float, bv) * p[5].f) + p[6].i;
+
+            /* eval attribute */
+            switch (p[0].i) {
+            case CON_NOP: break;
+            case CON_SET: box_attr_set(dst, p[2].i, p[7].i, v); break;
+            case CON_MIN: box_attr_set(dst, p[2].i, p[7].i, min(av, v)); break;
+            case CON_MAX: box_attr_set(dst, p[2].i, p[7].i, max(av, v)); break;}}
+        }
+    } temp_memory_end(tmp);
+}
 /* ---------------------------------------------------------------------------
  *                                  CLIP BOX
  * --------------------------------------------------------------------------- */
@@ -5737,6 +5945,8 @@ ui_layout(struct NVGcontext *vg, union process *p, struct box *b)
     case WIDGET_SBORDER: sborder_layout(b); break;
     case WIDGET_GRID_BOX: grid_box_layout(b); break;
     case WIDGET_FLEX_BOX: flex_box_layout(b); break;
+    case WIDGET_OVERLAP_BOX: overlap_box_layout(b, p->hdr.arena); break;
+    case WIDGET_CON_BOX: con_box_layout(b, p->hdr.arena); break;
     case WIDGET_SCROLL_REGION: scroll_region_layout(b); break;
     case WIDGET_SCROLL_BOX: scroll_box_layout(b); break;
     default: layout(p, b); break;}
@@ -5993,23 +6203,21 @@ ui_build_retained(struct context *ctx, struct ui_retained *ui, const char *label
     struct state *s = 0;
     ui->id = id("retained");
     if ((s = begin(ctx, ui->id))) {
-        sbox_begin(s, 200, 130); {
-            struct panel pan = panel_box_begin(s, "Retained"); {
-               struct flex_box fbx = flex_box_begin(s);
-                *fbx.orientation = FLEX_BOX_VERTICAL;
-                *fbx.spacing = 6;
-                {
-                    /* label button */
-                    flex_box_slot_fitting(s, &fbx);
-                    ui->btn = button_label(s, label, 0);
+        struct panel pan = panel_box_begin(s, "Retained"); {
+           struct flex_box fbx = flex_box_begin(s);
+            *fbx.orientation = FLEX_BOX_VERTICAL;
+            *fbx.spacing = 6;
+            {
+                /* label button */
+                flex_box_slot_fitting(s, &fbx);
+                ui->btn = button_label(s, label, 0);
 
-                    /* slider */
-                    {static float sld_val = 5.0f;
-                    flex_box_slot_static(s, &fbx, 30);
-                    ui->sld = sliderf(s, 0.0f, &sld_val, 10.0f);}
-                } flex_box_end(s, &fbx);
-            } panel_box_end(s, &pan, 0);
-        } sbox_end(s);
+                /* slider */
+                {static float sld_val = 5.0f;
+                flex_box_slot_static(s, &fbx, 30);
+                ui->sld = sliderf(s, 0.0f, &sld_val, 10.0f);}
+            } flex_box_end(s, &fbx);
+        } panel_box_end(s, &pan, 0);
         end(s);
     }
 }
@@ -6044,37 +6252,35 @@ ui_build_serialized_tables(FILE *fp)
 
     {struct state *s = 0;
     if ((s = begin(ctx, id("serialized_tables")))) {
-        sbox_begin(s, 200, 130); {
-            struct panel pan = panel_box_begin(s, "Serialized: Compile Time"); {
-               struct flex_box fbx = flex_box_begin(s);
-                *fbx.orientation = FLEX_BOX_VERTICAL;
-                *fbx.spacing = 6;
-                {
-                    /* label button */
-                    flex_box_slot_fitting(s, &fbx);
-                    setid(s, id("SERIALIZED_BUTTON"));
-                    button_label(s, txt("Label"));
+        struct panel pan = panel_box_begin(s, "Serialized: Compile Time"); {
+           struct flex_box fbx = flex_box_begin(s);
+            *fbx.orientation = FLEX_BOX_VERTICAL;
+            *fbx.spacing = 6;
+            {
+                /* label button */
+                flex_box_slot_fitting(s, &fbx);
+                setid(s, id("SERIALIZED_BUTTON"));
+                button_label(s, txt("Label"));
 
-                    /* icon buttons  */
-                    flex_box_slot_fitting(s, &fbx); {
-                        struct grid_box gbx = grid_box_begin(s);
-                        grid_box_slot(s, &gbx, 0, 0);
-                            setid(s, id("SERIALIZED_BUTTON_CONFIG"));
-                            button_icon(s, ICON_CONFIG);
-                        grid_box_slot(s, &gbx, 1, 0);
-                            setid(s, id("SERIALIZED_BUTTON_CHART"));
-                            button_icon(s, ICON_CHART_BAR);
-                        grid_box_slot(s, &gbx, 2, 0);
-                            setid(s, id("SERIALIZED_BUTTON_DESKTOP"));
-                            button_icon(s, ICON_DESKTOP);
-                        grid_box_slot(s, &gbx, 3, 0);
-                            setid(s, id("SERIALIZED_BUTTON_DOWNLOAD"));
-                            button_icon(s, ICON_DOWNLOAD);
-                        grid_box_end(s, &gbx);
-                    }
-                } flex_box_end(s, &fbx);
-            } panel_box_end(s, &pan, 0);
-        } sbox_end(s);
+                /* icon buttons  */
+                flex_box_slot_fitting(s, &fbx); {
+                    struct grid_box gbx = grid_box_begin(s);
+                    grid_box_slot(s, &gbx, 0, 0);
+                        setid(s, id("SERIALIZED_BUTTON_CONFIG"));
+                        button_icon(s, ICON_CONFIG);
+                    grid_box_slot(s, &gbx, 1, 0);
+                        setid(s, id("SERIALIZED_BUTTON_CHART"));
+                        button_icon(s, ICON_CHART_BAR);
+                    grid_box_slot(s, &gbx, 2, 0);
+                        setid(s, id("SERIALIZED_BUTTON_DESKTOP"));
+                        button_icon(s, ICON_DESKTOP);
+                    grid_box_slot(s, &gbx, 3, 0);
+                        setid(s, id("SERIALIZED_BUTTON_DOWNLOAD"));
+                        button_icon(s, ICON_DOWNLOAD);
+                    grid_box_end(s, &gbx);
+                }
+            } flex_box_end(s, &fbx);
+        } panel_box_end(s, &pan, 0);
         end(s);
     }}
     ui_commit(ctx);
@@ -6085,111 +6291,127 @@ static void
 ui_load_serialized_tables(struct context *ctx)
 {
     static const struct element g_1555159930_elements[] = {
-        {1048584, 0lu, 0lu, 0lu, 0, 17, 0, 0, 0},
-        {10, 6679361039399649282lu, 0lu, 6679361039399649281lu, 1, 18, 0, 0, 0},
-        {10, 6679361039399649283lu, 6679361039399649282lu, 6679361039399649281lu, 2, 19, 0, 0, 0},
-        {22, 6679361039399649285lu, 6679361039399649283lu, 6679361039399649284lu, 3, 20, 0, 5, 0},
-        {14, 6679361039399649287lu, 6679361039399649285lu, 6679361039399649286lu, 4, 21, 0, 5, 0},
-        {15, 6679361039399649289lu, 6679361039399649287lu, 6679361039399649288lu, 5, 22, 0, 10, 0},
-        {23, 6679361039399649291lu, 6679361039399649289lu, 6679361039399649290lu, 6, 23, 0, 12, 0},
-        {11, 6679361039399649293lu, 6679361039399649291lu, 6679361039399649292lu, 7, 24, 0, 12, 0},
-        {11, 6679361039399649294lu, 6679361039399649293lu, 6679361039399649292lu, 8, 25, 0, 12, 0},
-        {1, 6679361039399649296lu, 6679361039399649294lu, 6679361039399649295lu, 9, 26, 0, 17, 0},
-        {15, 6679361039399649298lu, 6679361039399649287lu, 6679361039399649297lu, 5, 22, 0, 20, 0},
-        {28, 6679361039399649300lu, 6679361039399649298lu, 6679361039399649299lu, 6, 23, 0, 22, 0},
-        {9, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 7, 24, 0, 22, 0},
-        {9, 6679361039399649303lu, 6679361039399649302lu, 6679361039399649301lu, 8, 25, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 22, 0},
-        {9, 6679361039399649305lu, 6679361039399649300lu, 6679361039399649304lu, 7, 24, 0, 29, 0},
-        {9, 6679361039399649306lu, 6679361039399649305lu, 6679361039399649304lu, 8, 25, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 29, 0},
-        {27, 6679361039399649308lu, 6679361039399649300lu, 6679361039399649307lu, 7, 24, 0, 36, 0},
-        {14, 6679361039399649310lu, 6679361039399649308lu, 6679361039399649309lu, 8, 25, 0, 41, 0},
-        {15, 6679361039399649312lu, 6679361039399649310lu, 6679361039399649311lu, 9, 26, 0, 46, 0},
-        {3, 998704728lu, 6679361039399649312lu, 6679361039399649313lu, 10, 27, 0, 48, 0},
-        {2, 6679361039399649315lu, 998704728lu, 6679361039399649314lu, 11, 28, 0, 48, 0},
-        {11, 6679361039399649317lu, 6679361039399649315lu, 6679361039399649316lu, 12, 29, 0, 48, 0},
-        {11, 6679361039399649318lu, 6679361039399649317lu, 6679361039399649316lu, 13, 30, 0, 48, 0},
-        {1, 6679361039399649320lu, 6679361039399649318lu, 6679361039399649319lu, 14, 31, 0, 53, 0},
-        {15, 6679361039399649322lu, 6679361039399649310lu, 6679361039399649321lu, 9, 26, 0, 56, 0},
-        {12, 6679361039399649324lu, 6679361039399649322lu, 6679361039399649323lu, 10, 27, 0, 58, 0},
-        {13, 6679361039399649326lu, 6679361039399649324lu, 6679361039399649325lu, 11, 28, 0, 61, 0},
-        {4, 3567268847lu, 6679361039399649326lu, 6679361039399649327lu, 12, 29, 0, 63, 0},
-        {2, 6679361039399649329lu, 3567268847lu, 6679361039399649328lu, 13, 30, 0, 63, 0},
-        {11, 6679361039399649331lu, 6679361039399649329lu, 6679361039399649330lu, 14, 31, 0, 63, 0},
-        {11, 6679361039399649332lu, 6679361039399649331lu, 6679361039399649330lu, 15, 32, 0, 63, 0},
-        {0, 6679361039399649334lu, 6679361039399649332lu, 6679361039399649333lu, 16, 33, 0, 68, 0},
-        {13, 6679361039399649336lu, 6679361039399649324lu, 6679361039399649335lu, 11, 28, 0, 70, 0},
-        {4, 3282852853lu, 6679361039399649336lu, 6679361039399649337lu, 12, 29, 0, 72, 0},
-        {2, 6679361039399649339lu, 3282852853lu, 6679361039399649338lu, 13, 30, 0, 72, 0},
-        {11, 6679361039399649341lu, 6679361039399649339lu, 6679361039399649340lu, 14, 31, 0, 72, 0},
-        {11, 6679361039399649342lu, 6679361039399649341lu, 6679361039399649340lu, 15, 32, 0, 72, 0},
-        {0, 6679361039399649344lu, 6679361039399649342lu, 6679361039399649343lu, 16, 33, 0, 77, 0},
-        {13, 6679361039399649346lu, 6679361039399649324lu, 6679361039399649345lu, 11, 28, 0, 79, 0},
-        {4, 3042075085lu, 6679361039399649346lu, 6679361039399649347lu, 12, 29, 0, 81, 0},
-        {2, 6679361039399649349lu, 3042075085lu, 6679361039399649348lu, 13, 30, 0, 81, 0},
-        {11, 6679361039399649351lu, 6679361039399649349lu, 6679361039399649350lu, 14, 31, 0, 81, 0},
-        {11, 6679361039399649352lu, 6679361039399649351lu, 6679361039399649350lu, 15, 32, 0, 81, 0},
-        {0, 6679361039399649354lu, 6679361039399649352lu, 6679361039399649353lu, 16, 33, 0, 86, 0},
-        {13, 6679361039399649356lu, 6679361039399649324lu, 6679361039399649355lu, 11, 28, 0, 88, 0},
-        {4, 79436257lu, 6679361039399649356lu, 6679361039399649357lu, 12, 29, 0, 90, 0},
-        {2, 6679361039399649359lu, 79436257lu, 6679361039399649358lu, 13, 30, 0, 90, 0},
-        {11, 6679361039399649361lu, 6679361039399649359lu, 6679361039399649360lu, 14, 31, 0, 90, 0},
-        {11, 6679361039399649362lu, 6679361039399649361lu, 6679361039399649360lu, 15, 32, 0, 90, 0},
-        {0, 6679361039399649364lu, 6679361039399649362lu, 6679361039399649363lu, 16, 33, 0, 95, 0},
-        {27, 6679361039399649365lu, 6679361039399649308lu, 6679361039399649307lu, 8, 25, 0|BOX_IMMUTABLE, 36, 0},
+        {1048584, 0lu, 0lu, 0lu, 0, 18, 0, 0, 0},
+        {25, 6679361039399649282lu, 0lu, 6679361039399649281lu, 1, 19, 0, 0, 0},
+        {15, 6679361039399649284lu, 6679361039399649282lu, 6679361039399649283lu, 2, 20, 0, 0, 0},
+        {16, 6679361039399649286lu, 6679361039399649284lu, 6679361039399649285lu, 3, 21, 0, 5, 0},
+        {26, 6679361039399649288lu, 6679361039399649286lu, 6679361039399649287lu, 4, 22, 0, 7, 0},
+        {12, 6679361039399649290lu, 6679361039399649288lu, 6679361039399649289lu, 5, 23, 0, 7, 0},
+        {10, 6679361039399649292lu, 6679361039399649290lu, 6679361039399649291lu, 6, 24, 0, 7, 0},
+        {10, 6679361039399649293lu, 6679361039399649292lu, 6679361039399649291lu, 7, 25, 0, 7, 0},
+        {11, 6679361039399649295lu, 6679361039399649293lu, 6679361039399649294lu, 8, 26, 0, 10, 0},
+        {11, 6679361039399649296lu, 6679361039399649295lu, 6679361039399649294lu, 9, 27, 0, 10, 0},
+        {1, 6679361039399649298lu, 6679361039399649296lu, 6679361039399649297lu, 10, 28, 0, 13, 0},
+        {16, 6679361039399649300lu, 6679361039399649284lu, 6679361039399649299lu, 3, 21, 0, 16, 0},
+        {31, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 4, 22, 0, 18, 0},
+        {9, 6679361039399649304lu, 6679361039399649302lu, 6679361039399649303lu, 5, 23, 0, 18, 0},
+        {9, 6679361039399649305lu, 6679361039399649304lu, 6679361039399649303lu, 6, 24, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 18, 0},
+        {9, 6679361039399649307lu, 6679361039399649302lu, 6679361039399649306lu, 5, 23, 0, 25, 0},
+        {9, 6679361039399649308lu, 6679361039399649307lu, 6679361039399649306lu, 6, 24, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 25, 0},
+        {30, 6679361039399649310lu, 6679361039399649302lu, 6679361039399649309lu, 5, 23, 0, 32, 0},
+        {15, 6679361039399649312lu, 6679361039399649310lu, 6679361039399649311lu, 6, 24, 0, 37, 0},
+        {16, 6679361039399649314lu, 6679361039399649312lu, 6679361039399649313lu, 7, 25, 0, 42, 0},
+        {3, 998704728lu, 6679361039399649314lu, 6679361039399649315lu, 8, 26, 0, 44, 0},
+        {2, 6679361039399649317lu, 998704728lu, 6679361039399649316lu, 9, 27, 0, 44, 0},
+        {12, 6679361039399649319lu, 6679361039399649317lu, 6679361039399649318lu, 10, 28, 0, 44, 0},
+        {10, 6679361039399649321lu, 6679361039399649319lu, 6679361039399649320lu, 11, 29, 0, 44, 0},
+        {10, 6679361039399649322lu, 6679361039399649321lu, 6679361039399649320lu, 12, 30, 0, 44, 0},
+        {11, 6679361039399649324lu, 6679361039399649322lu, 6679361039399649323lu, 13, 31, 0, 47, 0},
+        {11, 6679361039399649325lu, 6679361039399649324lu, 6679361039399649323lu, 14, 32, 0, 47, 0},
+        {1, 6679361039399649327lu, 6679361039399649325lu, 6679361039399649326lu, 15, 33, 0, 50, 0},
+        {16, 6679361039399649329lu, 6679361039399649312lu, 6679361039399649328lu, 7, 25, 0, 53, 0},
+        {13, 6679361039399649331lu, 6679361039399649329lu, 6679361039399649330lu, 8, 26, 0, 55, 0},
+        {14, 6679361039399649333lu, 6679361039399649331lu, 6679361039399649332lu, 9, 27, 0, 58, 0},
+        {4, 3567268847lu, 6679361039399649333lu, 6679361039399649334lu, 10, 28, 0, 60, 0},
+        {2, 6679361039399649336lu, 3567268847lu, 6679361039399649335lu, 11, 29, 0, 60, 0},
+        {12, 6679361039399649338lu, 6679361039399649336lu, 6679361039399649337lu, 12, 30, 0, 60, 0},
+        {10, 6679361039399649340lu, 6679361039399649338lu, 6679361039399649339lu, 13, 31, 0, 60, 0},
+        {10, 6679361039399649341lu, 6679361039399649340lu, 6679361039399649339lu, 14, 32, 0, 60, 0},
+        {11, 6679361039399649343lu, 6679361039399649341lu, 6679361039399649342lu, 15, 33, 0, 63, 0},
+        {11, 6679361039399649344lu, 6679361039399649343lu, 6679361039399649342lu, 16, 34, 0, 63, 0},
+        {0, 6679361039399649346lu, 6679361039399649344lu, 6679361039399649345lu, 17, 35, 0, 66, 0},
+        {14, 6679361039399649348lu, 6679361039399649331lu, 6679361039399649347lu, 9, 27, 0, 68, 0},
+        {4, 3282852853lu, 6679361039399649348lu, 6679361039399649349lu, 10, 28, 0, 70, 0},
+        {2, 6679361039399649351lu, 3282852853lu, 6679361039399649350lu, 11, 29, 0, 70, 0},
+        {12, 6679361039399649353lu, 6679361039399649351lu, 6679361039399649352lu, 12, 30, 0, 70, 0},
+        {10, 6679361039399649355lu, 6679361039399649353lu, 6679361039399649354lu, 13, 31, 0, 70, 0},
+        {10, 6679361039399649356lu, 6679361039399649355lu, 6679361039399649354lu, 14, 32, 0, 70, 0},
+        {11, 6679361039399649358lu, 6679361039399649356lu, 6679361039399649357lu, 15, 33, 0, 73, 0},
+        {11, 6679361039399649359lu, 6679361039399649358lu, 6679361039399649357lu, 16, 34, 0, 73, 0},
+        {0, 6679361039399649361lu, 6679361039399649359lu, 6679361039399649360lu, 17, 35, 0, 76, 0},
+        {14, 6679361039399649363lu, 6679361039399649331lu, 6679361039399649362lu, 9, 27, 0, 78, 0},
+        {4, 3042075085lu, 6679361039399649363lu, 6679361039399649364lu, 10, 28, 0, 80, 0},
+        {2, 6679361039399649366lu, 3042075085lu, 6679361039399649365lu, 11, 29, 0, 80, 0},
+        {12, 6679361039399649368lu, 6679361039399649366lu, 6679361039399649367lu, 12, 30, 0, 80, 0},
+        {10, 6679361039399649370lu, 6679361039399649368lu, 6679361039399649369lu, 13, 31, 0, 80, 0},
+        {10, 6679361039399649371lu, 6679361039399649370lu, 6679361039399649369lu, 14, 32, 0, 80, 0},
+        {11, 6679361039399649373lu, 6679361039399649371lu, 6679361039399649372lu, 15, 33, 0, 83, 0},
+        {11, 6679361039399649374lu, 6679361039399649373lu, 6679361039399649372lu, 16, 34, 0, 83, 0},
+        {0, 6679361039399649376lu, 6679361039399649374lu, 6679361039399649375lu, 17, 35, 0, 86, 0},
+        {14, 6679361039399649378lu, 6679361039399649331lu, 6679361039399649377lu, 9, 27, 0, 88, 0},
+        {4, 79436257lu, 6679361039399649378lu, 6679361039399649379lu, 10, 28, 0, 90, 0},
+        {2, 6679361039399649381lu, 79436257lu, 6679361039399649380lu, 11, 29, 0, 90, 0},
+        {12, 6679361039399649383lu, 6679361039399649381lu, 6679361039399649382lu, 12, 30, 0, 90, 0},
+        {10, 6679361039399649385lu, 6679361039399649383lu, 6679361039399649384lu, 13, 31, 0, 90, 0},
+        {10, 6679361039399649386lu, 6679361039399649385lu, 6679361039399649384lu, 14, 32, 0, 90, 0},
+        {11, 6679361039399649388lu, 6679361039399649386lu, 6679361039399649387lu, 15, 33, 0, 93, 0},
+        {11, 6679361039399649389lu, 6679361039399649388lu, 6679361039399649387lu, 16, 34, 0, 93, 0},
+        {0, 6679361039399649391lu, 6679361039399649389lu, 6679361039399649390lu, 17, 35, 0, 96, 0},
+        {30, 6679361039399649392lu, 6679361039399649310lu, 6679361039399649309lu, 6, 24, 0|BOX_IMMUTABLE, 32, 0},
     };
     static const uiid g_1555159930_tbl_keys[128] = {
-        0lu,0lu,6679361039399649282lu,6679361039399649283lu,0lu,6679361039399649285lu,0lu,6679361039399649287lu,
-        0lu,6679361039399649289lu,0lu,6679361039399649291lu,0lu,6679361039399649293lu,6679361039399649294lu,0lu,
-        6679361039399649296lu,0lu,6679361039399649298lu,0lu,6679361039399649300lu,0lu,6679361039399649302lu,6679361039399649303lu,
-        0lu,6679361039399649305lu,6679361039399649306lu,0lu,6679361039399649308lu,0lu,6679361039399649310lu,0lu,
-        6679361039399649312lu,0lu,0lu,6679361039399649315lu,0lu,6679361039399649317lu,6679361039399649318lu,0lu,
-        6679361039399649320lu,0lu,6679361039399649322lu,0lu,6679361039399649324lu,0lu,6679361039399649326lu,0lu,
-        0lu,6679361039399649329lu,0lu,6679361039399649331lu,6679361039399649332lu,0lu,6679361039399649334lu,0lu,
-        6679361039399649336lu,0lu,0lu,6679361039399649339lu,0lu,6679361039399649341lu,6679361039399649342lu,0lu,
-        6679361039399649344lu,0lu,6679361039399649346lu,0lu,0lu,6679361039399649349lu,0lu,6679361039399649351lu,
-        6679361039399649352lu,0lu,6679361039399649354lu,0lu,6679361039399649356lu,3042075085lu,0lu,6679361039399649359lu,
-        0lu,6679361039399649361lu,6679361039399649362lu,0lu,6679361039399649364lu,6679361039399649365lu,0lu,0lu,
-        998704728lu,0lu,0lu,0lu,0lu,0lu,0lu,0lu,
-        0lu,79436257lu,0lu,0lu,0lu,0lu,0lu,0lu,
-        0lu,0lu,0lu,0lu,0lu,0lu,0lu,3567268847lu,
-        0lu,0lu,0lu,0lu,0lu,3282852853lu,0lu,0lu,
+        0lu,0lu,6679361039399649282lu,0lu,6679361039399649284lu,0lu,6679361039399649286lu,0lu,
+        6679361039399649288lu,0lu,6679361039399649290lu,0lu,6679361039399649292lu,6679361039399649293lu,0lu,6679361039399649295lu,
+        6679361039399649296lu,0lu,6679361039399649298lu,0lu,6679361039399649300lu,0lu,6679361039399649302lu,0lu,
+        6679361039399649304lu,6679361039399649305lu,0lu,6679361039399649307lu,6679361039399649308lu,0lu,6679361039399649310lu,0lu,
+        6679361039399649312lu,0lu,6679361039399649314lu,0lu,0lu,6679361039399649317lu,0lu,6679361039399649319lu,
+        0lu,6679361039399649321lu,6679361039399649322lu,0lu,6679361039399649324lu,6679361039399649325lu,0lu,6679361039399649327lu,
+        0lu,6679361039399649329lu,0lu,6679361039399649331lu,0lu,6679361039399649333lu,0lu,0lu,
+        6679361039399649336lu,0lu,6679361039399649338lu,0lu,6679361039399649340lu,6679361039399649341lu,0lu,6679361039399649343lu,
+        6679361039399649344lu,0lu,6679361039399649346lu,0lu,6679361039399649348lu,0lu,0lu,6679361039399649351lu,
+        0lu,6679361039399649353lu,0lu,6679361039399649355lu,6679361039399649356lu,3042075085lu,6679361039399649358lu,6679361039399649359lu,
+        0lu,6679361039399649361lu,0lu,6679361039399649363lu,0lu,0lu,6679361039399649366lu,0lu,
+        998704728lu,6679361039399649368lu,6679361039399649370lu,6679361039399649371lu,0lu,6679361039399649373lu,6679361039399649374lu,0lu,
+        6679361039399649376lu,79436257lu,6679361039399649378lu,0lu,0lu,6679361039399649381lu,0lu,6679361039399649383lu,
+        0lu,6679361039399649385lu,6679361039399649386lu,0lu,6679361039399649388lu,6679361039399649389lu,0lu,3567268847lu,
+        6679361039399649391lu,6679361039399649392lu,0lu,0lu,0lu,3282852853lu,0lu,0lu,
         0lu,0lu,0lu,0lu,0lu,0lu,0lu,0lu
     };
     static const int g_1555159930_tbl_vals[128] = {
-        0,0,1,2,0,3,0,4,0,5,0,6,0,7,8,0,
-        9,0,10,0,11,0,12,13,0,14,15,0,16,0,17,0,
-        18,0,0,20,0,21,22,0,23,0,24,0,25,0,26,0,
-        0,28,0,29,30,0,31,0,32,0,0,34,0,35,36,0,
-        37,0,38,0,0,40,0,41,42,0,43,0,44,39,0,46,
-        0,47,48,0,49,50,0,0,19,0,0,0,0,0,0,0,
-        0,45,0,0,0,0,0,0,0,0,0,0,0,0,0,27,
-        0,0,0,0,0,33,0,0,0,0,0,0,0,0,0,0
+        0,0,1,0,2,0,3,0,4,0,5,0,6,7,0,8,
+        9,0,10,0,11,0,12,0,13,14,0,15,16,0,17,0,
+        18,0,19,0,0,21,0,22,0,23,24,0,25,26,0,27,
+        0,28,0,29,0,30,0,0,32,0,33,0,34,35,0,36,
+        37,0,38,0,39,0,0,41,0,42,0,43,44,49,45,46,
+        0,47,0,48,0,0,50,0,20,51,52,53,0,54,55,0,
+        56,58,57,0,0,59,0,60,0,61,62,0,63,64,0,31,
+        65,66,0,0,0,40,0,0,0,0,0,0,0,0,0,0
     };
-    static union param g_1555159930_params[97] = {
-        {200lu},{130lu},{0lu},{0lu},{6679361039399649283lu},{6679361039399649287lu},{1lu},{0lu},
-        {4lu},{2lu},{3lu},{0lu},{1lu},{1lu},{4lu},{6lu},
-        {6679361039399649294lu},{16lu},{0lu},{0lu},{0lu},{0lu},{1065353216lu},{1065353216lu},
-        {1065353216lu},{1065353216lu},{0lu},{0lu},{6679361039399649303lu},{1065353216lu},{1065353216lu},{1065353216lu},
-        {1065353216lu},{0lu},{0lu},{6679361039399649306lu},{0lu},{0lu},{0lu},{6679361039399649308lu},
-        {6679361039399649365lu},{6679361039399649310lu},{1lu},{4lu},{6lu},{2lu},{3lu},{0lu},
-        {1lu},{1lu},{6lu},{6lu},{6679361039399649318lu},{16lu},{0lu},{25lu},
-        {3lu},{0lu},{4lu},{4lu},{4lu},{0lu},{0lu},{1lu},
-        {1lu},{6lu},{6lu},{6679361039399649332lu},{0lu},{16lu},{1lu},{0lu},
-        {1lu},{1lu},{6lu},{6lu},{6679361039399649342lu},{1lu},{16lu},{2lu},
-        {0lu},{1lu},{1lu},{6lu},{6lu},{6679361039399649352lu},{2lu},{16lu},
-        {3lu},{0lu},{1lu},{1lu},{6lu},{6lu},{6679361039399649362lu},{3lu},
-        {16lu}
+    static union param g_1555159930_params[98] = {
+        {6679361039399649284lu},{1lu},{0lu},{4lu},{2lu},{3lu},{0lu},{4lu},
+        {6lu},{6679361039399649293lu},{1lu},{1lu},{6679361039399649296lu},{16lu},{0lu},{0lu},
+        {0lu},{0lu},{1065353216lu},{1065353216lu},{1065353216lu},{1065353216lu},{0lu},{0lu},
+        {6679361039399649305lu},{1065353216lu},{1065353216lu},{1065353216lu},{1065353216lu},{0lu},{0lu},{6679361039399649308lu},
+        {0lu},{0lu},{0lu},{6679361039399649310lu},{6679361039399649392lu},{6679361039399649312lu},{1lu},{4lu},
+        {6lu},{2lu},{3lu},{0lu},{6lu},{6lu},{6679361039399649322lu},{1lu},
+        {1lu},{6679361039399649325lu},{16lu},{0lu},{25lu},{3lu},{0lu},{4lu},
+        {4lu},{4lu},{0lu},{0lu},{6lu},{6lu},{6679361039399649341lu},{1lu},
+        {1lu},{6679361039399649344lu},{0lu},{16lu},{1lu},{0lu},{6lu},{6lu},
+        {6679361039399649356lu},{1lu},{1lu},{6679361039399649359lu},{1lu},{16lu},{2lu},{0lu},
+        {6lu},{6lu},{6679361039399649371lu},{1lu},{1lu},{6679361039399649374lu},{2lu},{16lu},
+        {3lu},{0lu},{6lu},{6lu},{6679361039399649386lu},{1lu},{1lu},{6679361039399649389lu},
+        {3lu},{16lu}
     };
     static const unsigned char g_1555159930_data[31] = {
         0x53,0x65,0x72,0x69,0x61,0x6c,0x69,0x7a,0x65,0x64,0x3a,0x20,0x43,0x6f,0x6d,0x70,
         0x69,0x6c,0x65,0x20,0x54,0x69,0x6d,0x65,0x00,0x4c,0x61,0x62,0x65,0x6c,0x00
     };
-    static struct box *g_1555159930_bfs[52];
-    static struct box g_1555159930_boxes[51];
+    static struct box *g_1555159930_bfs[68];
+    static struct box g_1555159930_boxes[67];
     static struct module g_1555159930_module;
     static struct repository g_1555159930_repo;
     static const struct component g_1555159930_component = {
-        1,1555159930, 17, 6,g_1555159930_elements, cntof(g_1555159930_elements),
+        1,1555159930, 18, 6,g_1555159930_elements, cntof(g_1555159930_elements),
         g_1555159930_tbl_vals, g_1555159930_tbl_keys,cntof(g_1555159930_tbl_keys),
         g_1555159930_data, cntof(g_1555159930_data),
         g_1555159930_params, cntof(g_1555159930_params),
@@ -6208,95 +6430,104 @@ ui_im(struct context *ctx)
     int ret = 0;
     struct state *s = 0;
     if ((s = begin(ctx, id("Main")))) {
-        {struct sborder sb = sborder_begin(s);
-        *sb.padx = 100, *sb.pady = 50;
-        sbox_begin(s, 180, 250); {
-            struct panel pan = panel_box_begin(s, "Immediate"); {
-               struct flex_box fbx = flex_box_begin(s);
-                *fbx.orientation = FLEX_BOX_VERTICAL;
-                *fbx.spacing = 6;
-                {
-                    /* label button */
-                    flex_box_slot_fitting(s, &fbx);
-                    if (button_label_clicked(s, txt("Rebuild")))
-                        ret = 1;
+        struct con_box cbx = con_box_begin(s, 0, 0);
+        static const struct con im_cons[] = {
+            {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,100}},
+            {CON_SET, {0,ATTR_T}, {SPARENT,ATTR_T}, {1,50}},
+            {CON_SET, {0,ATTR_W}, {SPARENT,ATTR_W}, {0,180}},
+            {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0,250}},
+        }; con_box_slot(s, &cbx, im_cons, cntof(im_cons));
 
-                    /* icon buttons  */
-                    flex_box_slot_fitting(s, &fbx); {
-                        struct grid_box gbx = grid_box_begin(s);
-                        grid_box_slot(s, &gbx, 0, 0);
-                        if (button_icon_clicked(s, ICON_CONFIG))
-                            fprintf(stdout, "config button clicked!\n");
-                        grid_box_slot(s, &gbx, 1, 0);
-                        if (button_icon_clicked(s, ICON_CHART_BAR))
-                            fprintf(stdout, "chart button clicked!\n");
-                        grid_box_slot(s, &gbx, 2, 0);
-                        if (button_icon_clicked(s, ICON_DESKTOP))
-                            fprintf(stdout, "desktop button clicked!\n");
-                        grid_box_slot(s, &gbx, 3, 0);
-                        if (button_icon_clicked(s, ICON_DOWNLOAD))
-                            fprintf(stdout, "download button clicked!\n");
-                        grid_box_end(s, &gbx);
-                    }
-                    /* combo */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static const char *items[] = {"Pistol","Shotgun","Plasma","BFG"};
-                        combo_box(s, id("weapons"), items, cntof(items));
-                    }
-                    /* slider */
-                    {static float sld_val = 5.0f;
-                    flex_box_slot_variable(s, &fbx, 30);
-                    sliderf(s, 0.0f, &sld_val, 10.0f);}
+        {struct panel pan = panel_box_begin(s, "Immediate"); {
+           struct flex_box fbx = flex_box_begin(s);
+            *fbx.orientation = FLEX_BOX_VERTICAL;
+            *fbx.spacing = 6;
+            {
+                /* label button */
+                flex_box_slot_fitting(s, &fbx);
+                if (button_label_clicked(s, txt("Rebuild")))
+                    ret = 1;
 
-                    /* checkbox */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static int unchecked = 0, checked = 1;
-                        struct grid_box gbx = grid_box_begin(s);
-                        grid_box_slot(s, &gbx, 0, 0);
-                            checkbox(s, &unchecked, "unchecked", 0);
-                        grid_box_slot(s, &gbx, 1, 0);
-                            checkbox(s, &checked, "checked", 0);
-                        grid_box_end(s, &gbx);
-                    }
-                    /* toggle */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static int inactive = 0, active = 1;
-                        struct grid_box gbx = grid_box_begin(s);
-                        grid_box_slot(s, &gbx, 0, 0);
-                            toggle(s, &inactive, "inactive", 0);
-                        grid_box_slot(s, &gbx, 1, 0);
-                            toggle(s, &active, "active", 0);
-                        grid_box_end(s, &gbx);
-                    }
-                    /* radio */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static int unselected = 0, selected = 1;
-                        struct grid_box gbx = grid_box_begin(s);
-                        grid_box_slot(s, &gbx, 0, 0);
-                            radio(s, &unselected, "unselected", 0);
-                        grid_box_slot(s, &gbx, 1, 0);
-                            radio(s, &selected, "selected", 0);
-                        grid_box_end(s, &gbx);
-                    }
-                } flex_box_end(s, &fbx);
-            } panel_box_end(s, &pan, 0);
-        } sbox_end(s);
-        sborder_end(s);}
+                /* icon buttons  */
+                flex_box_slot_fitting(s, &fbx); {
+                    struct grid_box gbx = grid_box_begin(s);
+                    grid_box_slot(s, &gbx, 0, 0);
+                    if (button_icon_clicked(s, ICON_CONFIG))
+                        fprintf(stdout, "config button clicked!\n");
+                    grid_box_slot(s, &gbx, 1, 0);
+                    if (button_icon_clicked(s, ICON_CHART_BAR))
+                        fprintf(stdout, "chart button clicked!\n");
+                    grid_box_slot(s, &gbx, 2, 0);
+                    if (button_icon_clicked(s, ICON_DESKTOP))
+                        fprintf(stdout, "desktop button clicked!\n");
+                    grid_box_slot(s, &gbx, 3, 0);
+                    if (button_icon_clicked(s, ICON_DOWNLOAD))
+                        fprintf(stdout, "download button clicked!\n");
+                    grid_box_end(s, &gbx);
+                }
+                /* combo */
+                flex_box_slot_fitting(s, &fbx); {
+                    static const char *items[] = {"Pistol","Shotgun","Plasma","BFG"};
+                    combo_box(s, id("weapons"), items, cntof(items));
+                }
+                /* slider */
+                {static float sld_val = 5.0f;
+                flex_box_slot_variable(s, &fbx, 30);
+                sliderf(s, 0.0f, &sld_val, 10.0f);}
+
+                /* checkbox */
+                flex_box_slot_fitting(s, &fbx); {
+                    static int unchecked = 0, checked = 1;
+                    struct grid_box gbx = grid_box_begin(s);
+                    grid_box_slot(s, &gbx, 0, 0);
+                        checkbox(s, &unchecked, "unchecked", 0);
+                    grid_box_slot(s, &gbx, 1, 0);
+                        checkbox(s, &checked, "checked", 0);
+                    grid_box_end(s, &gbx);
+                }
+                /* toggle */
+                flex_box_slot_fitting(s, &fbx); {
+                    static int inactive = 0, active = 1;
+                    struct grid_box gbx = grid_box_begin(s);
+                    grid_box_slot(s, &gbx, 0, 0);
+                        toggle(s, &inactive, "inactive", 0);
+                    grid_box_slot(s, &gbx, 1, 0);
+                        toggle(s, &active, "active", 0);
+                    grid_box_end(s, &gbx);
+                }
+                /* radio */
+                flex_box_slot_fitting(s, &fbx); {
+                    static int unselected = 0, selected = 1;
+                    struct grid_box gbx = grid_box_begin(s);
+                    grid_box_slot(s, &gbx, 0, 0);
+                        radio(s, &unselected, "unselected", 0);
+                    grid_box_slot(s, &gbx, 1, 0);
+                        radio(s, &selected, "selected", 0);
+                    grid_box_end(s, &gbx);
+                }
+            } flex_box_end(s, &fbx);
+        } panel_box_end(s, &pan, 0);}
 
         /* link: retained module */
-        {struct sborder sb = sborder_begin(s);
-        *sb.padx = 320, *sb.pady = 50;
+        {static const struct con ret_cons[] = {
+            {CON_SET, {1,ATTR_L}, {SPARENT,ATTR_L}, {1,320}},
+            {CON_SET, {1,ATTR_T}, {SPARENT,ATTR_T}, {1,50}},
+            {CON_SET, {1,ATTR_W}, {SPARENT,ATTR_W}, {0,200}},
+            {CON_SET, {1,ATTR_H}, {SPARENT,ATTR_H}, {0,130}},
+        }; con_box_slot(s, &cbx, ret_cons, cntof(ret_cons));}
         link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
-        sborder_end(s);}
 
         /* link: compile time module */
-        {struct sborder sb = sborder_begin(s);
-        *sb.padx = 580, *sb.pady = 50;
+        {static const struct con ct_cons[] = {
+            {CON_SET, {2,ATTR_L}, {SPARENT,ATTR_L}, {1,560}},
+            {CON_SET, {2,ATTR_T}, {SPARENT,ATTR_T}, {1,50}},
+            {CON_SET, {2,ATTR_W}, {SPARENT,ATTR_W}, {0,200}},
+            {CON_SET, {2,ATTR_H}, {SPARENT,ATTR_H}, {0,130}}
+        }; con_box_slot(s, &cbx, ct_cons, cntof(ct_cons));}
         link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
-        sborder_end(s);}
-
-        end(s);
-    } return ret;
+        con_box_end(s, &cbx);
+    } end(s);
+    return ret;
 }
 int main(int argc, char *argv[])
 {
@@ -6358,8 +6589,8 @@ int main(int argc, char *argv[])
             static int toggle = 0;
             static const char *lbl[] = {"First", "Second"};
             toggle = !toggle;
-            fprintf(stdout, "Rebuild button clicked!\n");
             ui_build_retained(ctx, &ui, lbl[toggle]);
+            fprintf(stdout, "Rebuild button clicked!\n");
         }
         /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
