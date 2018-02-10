@@ -6542,12 +6542,11 @@ ui_im(struct context *ctx)
 
             sborder_begin(s);
             scroll_region_begin(s);
-
             {struct flex_box fbx = flex_box_begin(s);
             *fbx.flow = FLEX_BOX_WRAP;
             for (i = 0; i < cntof(folder); ++i) {
                 flex_box_slot_static(s, &fbx, 60);
-                /* TODO(micha): should create own widget here but meh... */
+                /* TODO(micha): should create own folder widget here but meh... */
                 button_begin(s); {
                     struct sborder sbr = sborder_begin(s);
                     *sbr.x = 6, *sbr.y = 6;
@@ -6603,17 +6602,17 @@ ui_im(struct context *ctx)
                 flex_box_slot_fitting(s, &fbx); {
                     struct flex_box gbx = flex_box_begin(s);
                     flex_box_slot_dyn(s, &gbx);
-                        setid(s, id("SERIALIZED_BUTTON_CONFIG"));
-                        button_icon(s, ICON_CONFIG);
+                        if (button_icon_clicked(s, ICON_CONFIG))
+                            fprintf(stdout, "Button: Config pressed\n");
                     flex_box_slot_dyn(s, &gbx);
-                        setid(s, id("SERIALIZED_BUTTON_CHART"));
-                        button_icon(s, ICON_CHART_BAR);
+                        if (button_icon_clicked(s, ICON_CHART_BAR))
+                            fprintf(stdout, "Button: Config pressed\n");
                     flex_box_slot_dyn(s, &gbx);
-                        setid(s, id("SERIALIZED_BUTTON_DESKTOP"));
-                        button_icon(s, ICON_DESKTOP);
+                        if (button_icon_clicked(s, ICON_DESKTOP))
+                            fprintf(stdout, "Button: Config pressed\n");
                     flex_box_slot_dyn(s, &gbx);
-                        setid(s, id("SERIALIZED_BUTTON_DOWNLOAD"));
-                        button_icon(s, ICON_DOWNLOAD);
+                        if (button_icon_clicked(s, ICON_DOWNLOAD))
+                            fprintf(stdout, "Button: Config pressed\n");
                     flex_box_end(s, &gbx);
                 }
                 /* combo */
