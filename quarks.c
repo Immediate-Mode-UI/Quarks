@@ -2056,17 +2056,17 @@ intern struct box*
 at(struct box *b, int mx, int my)
 {
     struct list_hook *i = 0;
-    struct list_hook *first = b->lnks.next;
-    r:for (i = first; &b->lnks != i; i=i->next) {
+    struct list_hook *first = b->lnks.prev;
+    r:for (i = first; &b->lnks != i; i=i->prev) {
         struct box *sub = list_entry(i, struct box, node);
         if ((sub->flags & BOX_IMMUTABLE) || (sub->flags & BOX_HIDDEN)) continue;
         if (inbox(mx, my, sub->x, sub->y, sub->w, sub->h))
-            {b = sub; first = b->lnks.next; goto r;}
+            {b = sub; first = b->lnks.prev; goto r;}
         if (b->flags & BOX_UNSELECTABLE)
-            {first = b->node.next; b = b->parent; goto r;}
+            {first = b->node.prev; b = b->parent; goto r;}
     }
     if (b->flags & BOX_UNSELECTABLE)
-        return b->parent;
+        {first = b->node.prev; b = b->parent; goto r;}
     return b;
 }
 intern void
@@ -3411,8 +3411,6 @@ enum widget_type {
     WIDGET_SBORDER,
     WIDGET_SALIGN,
     WIDGET_SBOX,
-    WIDGET_GRID_BOX,
-    WIDGET_GRID_BOX_SLOT,
     WIDGET_FLEX_BOX,
     WIDGET_FLEX_BOX_SLOT,
     WIDGET_OVERLAP_BOX,
@@ -3546,6 +3544,12 @@ icon_blueprint(struct box *b)
     struct icon ico = icon_ref(b);
     b->dw = *ico.size;
     b->dh = *ico.size;
+}
+api void
+icon_layout(struct box *b)
+{
+    struct icon ico = icon_ref(b);
+    *ico.size = min(b->w, b->h);
 }
 
 /* ---------------------------------------------------------------------------
@@ -4123,116 +4127,16 @@ sbox_end(struct state *s)
     widget_end(s);
 }
 /* ---------------------------------------------------------------------------
- *                                  GRID BOX
- * --------------------------------------------------------------------------- */
-struct grid_box {
-    uiid id;
-    int *spacing;
-    int *cnt;
-};
-api struct grid_box
-grid_box_ref(struct box *b)
-{
-    struct grid_box gbx;
-    gbx.spacing = widget_get_int(b, 0);
-    gbx.cnt = widget_get_int(b, 1);
-    return gbx;
-}
-api struct grid_box
-grid_box_begin(struct state *s)
-{
-    struct grid_box gbx;
-    widget_begin(s, WIDGET_GRID_BOX);
-    gbx.id = widget_box_push(s);
-    gbx.spacing = widget_param_int(s, 4);
-    gbx.cnt = widget_param_int(s, 0);
-    return gbx;
-}
-api void
-grid_box_slot(struct state *s, struct grid_box *gbx, int col, int row)
-{
-    uiid id = 0;
-    int idx = *gbx->cnt;
-    if (idx) {
-        widget_box_pop(s);
-        widget_end(s);
-    }
-    widget_begin(s, WIDGET_GRID_BOX_SLOT);
-    id = widget_box_push(s);
-    widget_param_int(s, col);
-    widget_param_int(s, row);
-    *gbx->cnt = *gbx->cnt + 1;
-}
-api void
-grid_box_end(struct state *s, struct grid_box *gbx)
-{
-    int idx = *gbx->cnt;
-    if (idx) {
-        widget_box_pop(s);
-        widget_end(s);
-    } widget_box_pop(s);
-    widget_end(s);
-}
-api void
-grid_box_blueprint(struct box *b)
-{
-    struct list_hook *it;
-    int cols = 0, rows = 0;
-    struct grid_box gbx = grid_box_ref(b);
-    b->dw = b->dh = 0;
-    box_blueprint(b, 0, 0); /* calulate max cell size */
-    list_foreach(it, &b->lnks) {
-        /* find number of columns and rows */
-        struct box *sb = list_entry(it, struct box, node);
-        int slot_col = *widget_get_int(sb, 0);
-        int slot_row = *widget_get_int(sb, 1);
-        cols = max(cols, slot_col + 1);
-        rows = max(rows, slot_row + 1);
-    }
-    /* calculate desired size */
-    b->dw = b->dw * cols + max(0, cols-1) * *gbx.spacing;
-    b->dh = b->dh * rows + max(0, rows-1) * *gbx.spacing;
-}
-api void
-grid_box_layout(struct box *b)
-{
-    struct list_hook *it;
-    int cols = 0, rows = 0;
-    struct grid_box gbx = grid_box_ref(b);
-    /* find number of columns and rows */
-    list_foreach(it, &b->lnks) {
-        struct box *sb = list_entry(it, struct box, node);
-        int col = *widget_get_int(sb, 0);
-        int row = *widget_get_int(sb, 1);
-        cols = max(cols, col + 1);
-        rows = max(rows, row + 1);
-    }
-    /* calculate grid cell size */
-    {int space_x = max(b->w - max(cols-1, 0) * *gbx.spacing, 0);
-    int space_y = max(b->h - max(rows-1, 0) * *gbx.spacing, 0);
-    int cell_w = space_x / max(1,cols);
-    int cell_h = space_y / max(1,rows);
-
-    /* calculate each box position and size */
-    list_foreach(it, &b->lnks) {
-        struct box *sb = list_entry(it, struct box, node);
-        int slot_col = *widget_get_int(sb, 0);
-        int slot_row = *widget_get_int(sb, 1);
-
-        {int padx = slot_col * *gbx.spacing;
-        int pady = slot_row * *gbx.spacing;
-        sb->x = b->x + cell_w * slot_col + padx;
-        sb->y = b->y + cell_h * slot_row + pady;
-        sb->w = cell_w;
-        sb->h = cell_h;}
-    }}
-}
-/* ---------------------------------------------------------------------------
  *                                  FLEX BOX
  * --------------------------------------------------------------------------- */
 enum flex_box_orientation {
     FLEX_BOX_HORIZONTAL,
     FLEX_BOX_VERTICAL
+};
+enum flex_box_flow {
+    FLEX_BOX_STRETCH,
+    FLEX_BOX_FIT,
+    FLEX_BOX_WRAP
 };
 enum flex_box_slot_type {
     FLEX_BOX_SLOT_DYNAMIC,
@@ -4243,6 +4147,7 @@ enum flex_box_slot_type {
 struct flex_box {
     uiid id;
     int *orientation;
+    int *flow;
     int *spacing;
     int *cnt;
 };
@@ -4252,8 +4157,9 @@ flex_box_ref(struct box *b)
     struct flex_box fbx;
     fbx.id = *widget_get_id(b, 0);
     fbx.orientation = widget_get_int(b, 1);
-    fbx.spacing = widget_get_int(b, 2);
-    fbx.cnt = widget_get_int(b, 3);
+    fbx.flow = widget_get_int(b, 2);
+    fbx.spacing = widget_get_int(b, 3);
+    fbx.cnt = widget_get_int(b, 4);
     return fbx;
 }
 api struct flex_box
@@ -4264,6 +4170,7 @@ flex_box_begin(struct state *s)
     fbx.id = widget_box_push(s);
     widget_param_id(s, fbx.id);
     fbx.orientation = widget_param_int(s, FLEX_BOX_HORIZONTAL);
+    fbx.flow = widget_param_int(s, FLEX_BOX_STRETCH);
     fbx.spacing = widget_param_int(s, 4);
     fbx.cnt = widget_param_int(s, 0);
     return fbx;
@@ -4287,6 +4194,7 @@ flex_box_slot(struct state *s, struct flex_box *fbx,
 api void
 flex_box_slot_dyn(struct state *s, struct flex_box *fbx)
 {
+    assert(*fbx->flow != FLEX_BOX_WRAP);
     flex_box_slot(s, fbx, FLEX_BOX_SLOT_DYNAMIC, 0);
 }
 api void
@@ -4299,6 +4207,7 @@ api void
 flex_box_slot_variable(struct state *s,
     struct flex_box *fbx, int min_pixel_width)
 {
+    assert(*fbx->flow != FLEX_BOX_WRAP);
     flex_box_slot(s, fbx, FLEX_BOX_SLOT_VARIABLE, min_pixel_width);
 }
 api void
@@ -4322,6 +4231,7 @@ flex_box_blueprint(struct box *b)
     struct list_hook *it;
     struct flex_box fbx = flex_box_ref(b);
     b->dw = b->dh = 0;
+
     list_foreach(it, &b->lnks) {
         struct box *sb = list_entry(it, struct box, node);
         int styp = *widget_get_int(sb, 0);
@@ -4366,29 +4276,39 @@ flex_box_layout(struct box *b)
     struct list_hook *it;
     struct flex_box fbx = flex_box_ref(b);
 
-    int pos = 0, space = 0;
+    int space = 0;
+    int slot_size;
     int varcnt = 0, staticsz = 0, fixsz = 0, maxvar = 0;
     int dynsz = 0, varsz = 0, var = 0, dyncnt = 0;
 
     /* calculate space for widgets without padding and spacing */
     if (*fbx.orientation == FLEX_BOX_HORIZONTAL)
-        space = max(b->w - (*fbx.cnt-1)**fbx.spacing, 0);
-    else space = max(b->h - (*fbx.cnt-1)**fbx.spacing, 0);
-
+        space = max(b->w - (*fbx.cnt-1)**fbx.spacing, 0), slot_size = b->h;
+    else space = max(b->h - (*fbx.cnt-1)**fbx.spacing, 0), slot_size = b->w;
+    if (*fbx.flow == FLEX_BOX_FIT || *fbx.flow == FLEX_BOX_WRAP) {
+        /* fit flex box to content */
+        if (*fbx.orientation == FLEX_BOX_HORIZONTAL) {
+            list_foreach(it, &b->lnks) {
+                struct box *n = list_entry(it, struct box, node);
+                slot_size = max(slot_size, n->dh);
+            } slot_size = min(b->dh, slot_size);
+            if (*fbx.flow == FLEX_BOX_FIT)
+                b->h = slot_size;
+        } else {
+            list_foreach(it, &b->lnks) {
+                struct box *n = list_entry(it, struct box, node);
+                slot_size = max(slot_size, n->dw);
+            } slot_size = min(b->dw, slot_size);
+            if (*fbx.flow == FLEX_BOX_FIT)
+                b->w = slot_size;
+        }
+    }
     /* calculate space requirements and slot metrics */
     list_foreach(it, &b->lnks) {
         struct box *sb = list_entry(it, struct box, node);
         int slot_typ = *widget_get_int(sb, 0);
         int *slot_pix = widget_get_int(sb, 1);
 
-        /* setup opposite orientation position and size */
-        if (*fbx.orientation == FLEX_BOX_HORIZONTAL) {
-            sb->y = b->y;
-            sb->h = max(0, b->h);
-        } else {
-            sb->x = b->x;
-            sb->w = max(0, b->w);
-        }
         /* calculate min size and dynamic size  */
         switch (slot_typ) {
         case FLEX_BOX_SLOT_DYNAMIC: {
@@ -4406,12 +4326,18 @@ flex_box_layout(struct box *b)
             maxvar = max(*slot_pix, maxvar);
             varcnt++;
         } break;}
+
+        /* setup opposite orientation position and size */
+        if (*fbx.orientation == FLEX_BOX_HORIZONTAL)
+            sb->h = max(0, slot_size);
+        else sb->w = max(0, slot_size);
     }
     /* calculate dynamic slot size */
     dynsz = max(space - staticsz, 0);
     varsz = max(dynsz - fixsz, 0);
     if (varsz) {
         if (varcnt) {
+            assert(*fbx.flow != FLEX_BOX_WRAP);
             var = dynsz / max(varcnt,1);
             if (maxvar > var) {
                 /* not enough space so shrink dynamic space */
@@ -4431,13 +4357,12 @@ flex_box_layout(struct box *b)
                 dynsz = max(space - staticsz, 0);
                 var = dynsz / max(varcnt,1);
             }
-        } else var = dynsz / max(varcnt+dyncnt,1);
+        } else var = dynsz / max(varcnt + dyncnt,1);
     } else var = 0;
 
     /* set position and size */
-    switch (*fbx.orientation) {
-    case FLEX_BOX_HORIZONTAL: pos = b->x; break;
-    case FLEX_BOX_VERTICAL: pos = b->y; break;}
+    {int total_w = b->w, total_h = b->h;
+    int posx = b->x, posy = b->y, cnt = 0;
     list_foreach(it, &b->lnks) {
         struct box *sb = list_entry(it, struct box, node);
         int slot_typ = *widget_get_int(sb, 0);
@@ -4446,29 +4371,50 @@ flex_box_layout(struct box *b)
         /* setup slot size (width/height) */
         switch (*fbx.orientation) {
         case FLEX_BOX_HORIZONTAL: {
-            sb->x = pos;
+            if (*fbx.flow == FLEX_BOX_WRAP && cnt) {
+                if (posx + slot_pix > b->x + b->w) {
+                    posx = b->x, posy += slot_size + *fbx.spacing;
+                    total_h = max(total_h, posy - b->y), cnt = 0;
+                }
+            }
+            sb->x = posx, sb->y = posy;
+            posx += *fbx.spacing;
+            total_w = max(total_w, posx - b->x);
+
             switch (slot_typ) {
             case FLEX_BOX_SLOT_DYNAMIC: sb->w = var; break;
             case FLEX_BOX_SLOT_STATIC:  sb->w = slot_pix; break;
             case FLEX_BOX_SLOT_FITTING: sb->w = slot_pix; break;
             case FLEX_BOX_SLOT_VARIABLE:
-                sb->w = (slot_pix > var) ? slot_pix: var; break;
-            } pos += sb->w;
-            b->w = pos - b->x;
+                sb->w = (slot_pix > var) ? slot_pix: var; break;}
+            posx += sb->w; cnt++;
+            if (*fbx.flow != FLEX_BOX_WRAP)
+                total_w = posx - b->x;
         } break;
         case FLEX_BOX_VERTICAL: {
-            sb->y = pos;
+            if (*fbx.flow == FLEX_BOX_WRAP && cnt) {
+                if (posy + slot_pix > b->y + b->h) {
+                    posy = b->y, posx += slot_size + *fbx.spacing;
+                    total_w = max(total_w, posx - b->x), cnt = 0;
+                }
+            }
+            sb->x = posx, sb->y = posy;
+            posy += *fbx.spacing;
+                total_h = max(total_h, posy - b->y);
+
             switch (slot_typ) {
             case FLEX_BOX_SLOT_DYNAMIC: sb->h = var; break;
             case FLEX_BOX_SLOT_STATIC:  sb->h = slot_pix; break;
             case FLEX_BOX_SLOT_FITTING: sb->h = slot_pix; break;
             case FLEX_BOX_SLOT_VARIABLE:
-                sb->h = (slot_pix > var) ? slot_pix: var; break;
-            } pos += sb->h;
-            b->h = pos - b->y;
+                sb->h = (slot_pix > var) ? slot_pix: var; break;}
+            posy += sb->h + *fbx.spacing;
+            if (*fbx.flow != FLEX_BOX_WRAP)
+                total_w = posx - b->x;
         } break;}
-        pos += *fbx.spacing;
     }
+    b->dw = b->w = total_w;
+    b->dh = b->h = total_h;}
 }
 /* ---------------------------------------------------------------------------
  *                                  OVERLAP BOX
@@ -4529,28 +4475,27 @@ overlap_box_layout(struct box *b, struct memory_arena *arena)
     int i = 0;
     int slot_cnt = 0;
     struct box **boxes = 0;
-    struct list_hook *it = 0;
+    struct list_hook *it = 0, *sit = 0;
     struct temp_memory tmp = temp_memory_begin(arena);
-    box_layout(b, 0);
 
     /* find maximum zorder */
     list_foreach(it, &b->lnks) {
         struct box *n = list_entry(it, struct box, node);
         int slot_zorder = *widget_get_int(n, 1);
         slot_cnt = max(slot_zorder, slot_cnt);
-    }
+    } slot_cnt += 1;
     /* allocate and setup temp sorting array */
-    boxes = arena_push_array(arena, slot_cnt + 1, struct box*);
-    list_foreach(it, &b->lnks) {
+    boxes = arena_push_array(arena, slot_cnt, struct box*);
+    list_foreach_s(it, sit, &b->lnks) {
         struct box *n = list_entry(it, struct box, node);
         int zorder = *widget_get_int(n, 1);
         if (!zorder) continue;
-        list_del(&b->node);
+        list_del(&n->node);
         boxes[zorder] = n;
     }
     /* add boxes back in sorted order */
-    for (i = slot_cnt; i > 0; --i) {
-        if (!boxes[i-1]) continue;
+    for (i = slot_cnt-1; i >= 0; --i) {
+        if (!boxes[i]) continue;
         list_add_head(&b->lnks, &boxes[i]->node);
     } i = 1;
     /* set correct zorder for each child box */
@@ -4774,6 +4719,7 @@ con_box_layout(struct box *b, struct memory_arena *arena)
     list_foreach(it, &b->lnks)
         boxes[i++] = list_entry(it, struct box, node);
 
+    box_layout(b, 0);
     /* evaluate conditions */
     for (i = 0; i < *cbx.cond_cnt; ++i) {
         int av = 0, bv = 0;
@@ -5540,14 +5486,11 @@ api void
 panel_content_begin(struct state *s, struct panel *pan)
 {
     flex_box_slot_dyn(s, &pan->fbx);
-    scroll_box_begin(s);
-    pan->sbx = sborder_begin(s);
 }
 api void
 panel_content_end(struct state *s, struct panel *pan)
 {
-    sborder_end(s);
-    scroll_box_end(s);
+
 }
 api uiid
 panel_status_begin(struct state *s, struct panel *pan)
@@ -5594,11 +5537,15 @@ panel_box_begin(struct state *s, const char *title)
     pan = panel_begin(s);
     panel_header(s, &pan, title);
     panel_content_begin(s, &pan);
+    scroll_box_begin(s);
+    sborder_begin(s);
     return pan;
 }
 api void
 panel_box_end(struct state *s, struct panel *pan, const char *status)
 {
+    sborder_end(s);
+    scroll_box_end(s);
     panel_content_end(s, pan);
     panel_status(s, pan, status);
     panel_end(s, pan);
@@ -5888,6 +5835,7 @@ enum icons {
     ICON_CHART_BAR,
     ICON_DESKTOP,
     ICON_DOWNLOAD,
+    ICON_FOLDER,
     ICON_CNT
 };
 intern int
@@ -5941,7 +5889,8 @@ nvgIcon(struct NVGcontext *vg, struct box *b)
     case ICON_CONFIG: icon_rune = ICON_FA_COGS; break;
     case ICON_CHART_BAR: icon_rune = ICON_FA_BAR_CHART; break;
     case ICON_DESKTOP: icon_rune = ICON_FA_DESKTOP; break;
-    case ICON_DOWNLOAD: icon_rune = ICON_FA_DOWNLOAD; break;}
+    case ICON_DOWNLOAD: icon_rune = ICON_FA_DOWNLOAD; break;
+    case ICON_FOLDER: icon_rune = ICON_FA_FOLDER_OPEN; break;}
     nvgText(vg, b->x, b->y, icon_rune, NULL);
 }
 api void
@@ -6082,8 +6031,7 @@ nvgClipRegion(struct NVGcontext *vg, struct box *b, int pidx, struct rect *sis)
         int maxx = min(sis->x + sis->w, b->x + b->w);
         int maxy = min(sis->y + sis->h, b->y + b->h);
 
-        sis->x = minx;
-        sis->y = miny;
+        sis->x = minx, sis->y = miny;
         sis->w = max(maxx - minx, 0);
         sis->h = max(maxy - miny, 0);}
         nvgScissor(vg, sis->x, sis->y, sis->w, sis->h);
@@ -6169,7 +6117,11 @@ nvgSidebarScaler(struct NVGcontext *vg, struct box *b)
     NVGcolor col = nvgRGBA(128,16,8,255);
 
     nvgBeginPath(vg);
-    nvgRect(vg, b->x+1,b->y+1, b->w-2,b->h-2);
+    nvgMoveTo(vg, b->x, b->y);
+    nvgLineTo(vg, b->x + b->w, b->y + 5);
+    nvgLineTo(vg, b->x + b->w, b->y + b->h - 5);
+    nvgLineTo(vg, b->x, b->y + b->h);
+    nvgClosePath(vg);
     if (b->hovered)
         col.a = 0.9f;
     nvgFillColor(vg, col);
@@ -6209,7 +6161,6 @@ ui_blueprint(struct NVGcontext *vg, union process *p, struct box *b)
     case WIDGET_ICON: icon_blueprint(b); break;
     case WIDGET_SLIDER: slider_blueprint(b); break;
     case WIDGET_SBORDER: sborder_blueprint(b); break;
-    case WIDGET_GRID_BOX: grid_box_blueprint(b); break;
     case WIDGET_FLEX_BOX: flex_box_blueprint(b); break;
     case WIDGET_SCROLL_BOX: scroll_box_blueprint(b); break;
     default: blueprint(p, b); break;}
@@ -6218,12 +6169,12 @@ static void
 ui_layout(struct NVGcontext *vg, union process *p, struct box *b)
 {
     switch (b->type) {
+    case WIDGET_ICON: icon_layout(b); break;
     case WIDGET_SLIDER: slider_layout(b); break;
     case WIDGET_SCROLL: scroll_layout(b); break;
     case WIDGET_COMBO: combo_layout(p->hdr.ctx, b); break;
     case WIDGET_SALIGN: salign_layout(b); break;
     case WIDGET_SBORDER: sborder_layout(b); break;
-    case WIDGET_GRID_BOX: grid_box_layout(b); break;
     case WIDGET_FLEX_BOX: flex_box_layout(b); break;
     case WIDGET_OVERLAP_BOX: overlap_box_layout(b, p->hdr.arena); break;
     case WIDGET_CON_BOX: con_box_layout(b, p->hdr.arena); break;
@@ -6267,9 +6218,8 @@ ui_draw(struct NVGcontext *vg, struct box *b,
     case WIDGET_SLIDER: nvgSlider(vg, b); break;
     case WIDGET_COMBO_POPUP: nvgComboPopup(vg, b); break;
     case WIDGET_SCROLL: nvgScroll(vg, b); break;
-    case WIDGET_CLIP_BOX: nvgClipRegion(vg, b, 0, scissor); break;
     case WIDGET_SCROLL_REGION: nvgClipRegion(vg, b, 4, scissor); break;
-    case WIDGET_SCALER_BOX: nvgScaleRegion(vg, b, scale_x, scale_y);
+    case WIDGET_SCALER_BOX: nvgScaleRegion(vg, b, scale_x, scale_y); break;
     case WIDGET_PANEL: nvgPanel(vg, b); break;
     case WIDGET_PANEL_HEADER: nvgPanelHeader(vg, b); break;
     case WIDGET_PANEL_STATUSBAR: nvgPanelHeader(vg, b); break;
@@ -6490,7 +6440,7 @@ ui_build_retained(struct context *ctx, struct ui_retained *ui, const char *label
     ui->id = id("retained");
     if ((s = begin(ctx, ui->id))) {
         struct panel pan = panel_box_begin(s, "Retained"); {
-           struct flex_box fbx = flex_box_begin(s);
+            {struct flex_box fbx = flex_box_begin(s);
             *fbx.orientation = FLEX_BOX_VERTICAL;
             *fbx.spacing = 6;
             {
@@ -6502,7 +6452,7 @@ ui_build_retained(struct context *ctx, struct ui_retained *ui, const char *label
                 {static float sld_val = 5.0f;
                 flex_box_slot_static(s, &fbx, 30);
                 ui->sld = sliderf(s, 0.0f, &sld_val, 10.0f);}
-            } flex_box_end(s, &fbx);
+            } flex_box_end(s, &fbx);}
         } panel_box_end(s, &pan, 0);
         end(s);
     }
@@ -6550,20 +6500,20 @@ ui_build_serialized_tables(FILE *fp)
 
                 /* icon buttons  */
                 flex_box_slot_fitting(s, &fbx); {
-                    struct grid_box gbx = grid_box_begin(s);
-                    grid_box_slot(s, &gbx, 0, 0);
+                    struct flex_box gbx = flex_box_begin(s);
+                    flex_box_slot_dyn(s, &gbx);
                         setid(s, id("SERIALIZED_BUTTON_CONFIG"));
                         button_icon(s, ICON_CONFIG);
-                    grid_box_slot(s, &gbx, 1, 0);
+                    flex_box_slot_dyn(s, &gbx);
                         setid(s, id("SERIALIZED_BUTTON_CHART"));
                         button_icon(s, ICON_CHART_BAR);
-                    grid_box_slot(s, &gbx, 2, 0);
+                    flex_box_slot_dyn(s, &gbx);
                         setid(s, id("SERIALIZED_BUTTON_DESKTOP"));
                         button_icon(s, ICON_DESKTOP);
-                    grid_box_slot(s, &gbx, 3, 0);
+                    flex_box_slot_dyn(s, &gbx);
                         setid(s, id("SERIALIZED_BUTTON_DOWNLOAD"));
                         button_icon(s, ICON_DOWNLOAD);
-                    grid_box_end(s, &gbx);
+                    flex_box_end(s, &gbx);
                 }
             } flex_box_end(s, &fbx);
         } panel_box_end(s, &pan, 0);
@@ -6576,160 +6526,62 @@ ui_build_serialized_tables(FILE *fp)
 static void
 ui_load_serialized_tables(struct context *ctx)
 {
-    static const struct element g_1555159930_elements[] = {
-        {1048584, 0lu, 0lu, 0lu, 0, 18, 0, 0, 0},
-        {25, 6679361039399649282lu, 0lu, 6679361039399649281lu, 1, 19, 0, 0, 0},
-        {15, 6679361039399649284lu, 6679361039399649282lu, 6679361039399649283lu, 2, 20, 0, 0, 0},
-        {16, 6679361039399649286lu, 6679361039399649284lu, 6679361039399649285lu, 3, 21, 0, 5, 0},
-        {26, 6679361039399649288lu, 6679361039399649286lu, 6679361039399649287lu, 4, 22, 0, 7, 0},
-        {12, 6679361039399649290lu, 6679361039399649288lu, 6679361039399649289lu, 5, 23, 0, 7, 0},
-        {10, 6679361039399649292lu, 6679361039399649290lu, 6679361039399649291lu, 6, 24, 0, 7, 0},
-        {10, 6679361039399649293lu, 6679361039399649292lu, 6679361039399649291lu, 7, 25, 0, 7, 0},
-        {11, 6679361039399649295lu, 6679361039399649293lu, 6679361039399649294lu, 8, 26, 0, 10, 0},
-        {11, 6679361039399649296lu, 6679361039399649295lu, 6679361039399649294lu, 9, 27, 0, 10, 0},
-        {1, 6679361039399649298lu, 6679361039399649296lu, 6679361039399649297lu, 10, 28, 0, 13, 0},
-        {16, 6679361039399649300lu, 6679361039399649284lu, 6679361039399649299lu, 3, 21, 0, 16, 0},
-        {31, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 4, 22, 0, 18, 0},
-        {9, 6679361039399649304lu, 6679361039399649302lu, 6679361039399649303lu, 5, 23, 0, 18, 0},
-        {9, 6679361039399649305lu, 6679361039399649304lu, 6679361039399649303lu, 6, 24, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 18, 0},
-        {9, 6679361039399649307lu, 6679361039399649302lu, 6679361039399649306lu, 5, 23, 0, 25, 0},
-        {9, 6679361039399649308lu, 6679361039399649307lu, 6679361039399649306lu, 6, 24, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 25, 0},
-        {30, 6679361039399649310lu, 6679361039399649302lu, 6679361039399649309lu, 5, 23, 0, 32, 0},
-        {15, 6679361039399649312lu, 6679361039399649310lu, 6679361039399649311lu, 6, 24, 0, 37, 0},
-        {16, 6679361039399649314lu, 6679361039399649312lu, 6679361039399649313lu, 7, 25, 0, 42, 0},
-        {3, 998704728lu, 6679361039399649314lu, 6679361039399649315lu, 8, 26, 0, 44, 0},
-        {2, 6679361039399649317lu, 998704728lu, 6679361039399649316lu, 9, 27, 0, 44, 0},
-        {12, 6679361039399649319lu, 6679361039399649317lu, 6679361039399649318lu, 10, 28, 0, 44, 0},
-        {10, 6679361039399649321lu, 6679361039399649319lu, 6679361039399649320lu, 11, 29, 0, 44, 0},
-        {10, 6679361039399649322lu, 6679361039399649321lu, 6679361039399649320lu, 12, 30, 0, 44, 0},
-        {11, 6679361039399649324lu, 6679361039399649322lu, 6679361039399649323lu, 13, 31, 0, 47, 0},
-        {11, 6679361039399649325lu, 6679361039399649324lu, 6679361039399649323lu, 14, 32, 0, 47, 0},
-        {1, 6679361039399649327lu, 6679361039399649325lu, 6679361039399649326lu, 15, 33, 0, 50, 0},
-        {16, 6679361039399649329lu, 6679361039399649312lu, 6679361039399649328lu, 7, 25, 0, 53, 0},
-        {13, 6679361039399649331lu, 6679361039399649329lu, 6679361039399649330lu, 8, 26, 0, 55, 0},
-        {14, 6679361039399649333lu, 6679361039399649331lu, 6679361039399649332lu, 9, 27, 0, 58, 0},
-        {4, 3567268847lu, 6679361039399649333lu, 6679361039399649334lu, 10, 28, 0, 60, 0},
-        {2, 6679361039399649336lu, 3567268847lu, 6679361039399649335lu, 11, 29, 0, 60, 0},
-        {12, 6679361039399649338lu, 6679361039399649336lu, 6679361039399649337lu, 12, 30, 0, 60, 0},
-        {10, 6679361039399649340lu, 6679361039399649338lu, 6679361039399649339lu, 13, 31, 0, 60, 0},
-        {10, 6679361039399649341lu, 6679361039399649340lu, 6679361039399649339lu, 14, 32, 0, 60, 0},
-        {11, 6679361039399649343lu, 6679361039399649341lu, 6679361039399649342lu, 15, 33, 0, 63, 0},
-        {11, 6679361039399649344lu, 6679361039399649343lu, 6679361039399649342lu, 16, 34, 0, 63, 0},
-        {0, 6679361039399649346lu, 6679361039399649344lu, 6679361039399649345lu, 17, 35, 0, 66, 0},
-        {14, 6679361039399649348lu, 6679361039399649331lu, 6679361039399649347lu, 9, 27, 0, 68, 0},
-        {4, 3282852853lu, 6679361039399649348lu, 6679361039399649349lu, 10, 28, 0, 70, 0},
-        {2, 6679361039399649351lu, 3282852853lu, 6679361039399649350lu, 11, 29, 0, 70, 0},
-        {12, 6679361039399649353lu, 6679361039399649351lu, 6679361039399649352lu, 12, 30, 0, 70, 0},
-        {10, 6679361039399649355lu, 6679361039399649353lu, 6679361039399649354lu, 13, 31, 0, 70, 0},
-        {10, 6679361039399649356lu, 6679361039399649355lu, 6679361039399649354lu, 14, 32, 0, 70, 0},
-        {11, 6679361039399649358lu, 6679361039399649356lu, 6679361039399649357lu, 15, 33, 0, 73, 0},
-        {11, 6679361039399649359lu, 6679361039399649358lu, 6679361039399649357lu, 16, 34, 0, 73, 0},
-        {0, 6679361039399649361lu, 6679361039399649359lu, 6679361039399649360lu, 17, 35, 0, 76, 0},
-        {14, 6679361039399649363lu, 6679361039399649331lu, 6679361039399649362lu, 9, 27, 0, 78, 0},
-        {4, 3042075085lu, 6679361039399649363lu, 6679361039399649364lu, 10, 28, 0, 80, 0},
-        {2, 6679361039399649366lu, 3042075085lu, 6679361039399649365lu, 11, 29, 0, 80, 0},
-        {12, 6679361039399649368lu, 6679361039399649366lu, 6679361039399649367lu, 12, 30, 0, 80, 0},
-        {10, 6679361039399649370lu, 6679361039399649368lu, 6679361039399649369lu, 13, 31, 0, 80, 0},
-        {10, 6679361039399649371lu, 6679361039399649370lu, 6679361039399649369lu, 14, 32, 0, 80, 0},
-        {11, 6679361039399649373lu, 6679361039399649371lu, 6679361039399649372lu, 15, 33, 0, 83, 0},
-        {11, 6679361039399649374lu, 6679361039399649373lu, 6679361039399649372lu, 16, 34, 0, 83, 0},
-        {0, 6679361039399649376lu, 6679361039399649374lu, 6679361039399649375lu, 17, 35, 0, 86, 0},
-        {14, 6679361039399649378lu, 6679361039399649331lu, 6679361039399649377lu, 9, 27, 0, 88, 0},
-        {4, 79436257lu, 6679361039399649378lu, 6679361039399649379lu, 10, 28, 0, 90, 0},
-        {2, 6679361039399649381lu, 79436257lu, 6679361039399649380lu, 11, 29, 0, 90, 0},
-        {12, 6679361039399649383lu, 6679361039399649381lu, 6679361039399649382lu, 12, 30, 0, 90, 0},
-        {10, 6679361039399649385lu, 6679361039399649383lu, 6679361039399649384lu, 13, 31, 0, 90, 0},
-        {10, 6679361039399649386lu, 6679361039399649385lu, 6679361039399649384lu, 14, 32, 0, 90, 0},
-        {11, 6679361039399649388lu, 6679361039399649386lu, 6679361039399649387lu, 15, 33, 0, 93, 0},
-        {11, 6679361039399649389lu, 6679361039399649388lu, 6679361039399649387lu, 16, 34, 0, 93, 0},
-        {0, 6679361039399649391lu, 6679361039399649389lu, 6679361039399649390lu, 17, 35, 0, 96, 0},
-        {30, 6679361039399649392lu, 6679361039399649310lu, 6679361039399649309lu, 6, 24, 0|BOX_IMMUTABLE, 32, 0},
-    };
-    static const uiid g_1555159930_tbl_keys[128] = {
-        0lu,0lu,6679361039399649282lu,0lu,6679361039399649284lu,0lu,6679361039399649286lu,0lu,
-        6679361039399649288lu,0lu,6679361039399649290lu,0lu,6679361039399649292lu,6679361039399649293lu,0lu,6679361039399649295lu,
-        6679361039399649296lu,0lu,6679361039399649298lu,0lu,6679361039399649300lu,0lu,6679361039399649302lu,0lu,
-        6679361039399649304lu,6679361039399649305lu,0lu,6679361039399649307lu,6679361039399649308lu,0lu,6679361039399649310lu,0lu,
-        6679361039399649312lu,0lu,6679361039399649314lu,0lu,0lu,6679361039399649317lu,0lu,6679361039399649319lu,
-        0lu,6679361039399649321lu,6679361039399649322lu,0lu,6679361039399649324lu,6679361039399649325lu,0lu,6679361039399649327lu,
-        0lu,6679361039399649329lu,0lu,6679361039399649331lu,0lu,6679361039399649333lu,0lu,0lu,
-        6679361039399649336lu,0lu,6679361039399649338lu,0lu,6679361039399649340lu,6679361039399649341lu,0lu,6679361039399649343lu,
-        6679361039399649344lu,0lu,6679361039399649346lu,0lu,6679361039399649348lu,0lu,0lu,6679361039399649351lu,
-        0lu,6679361039399649353lu,0lu,6679361039399649355lu,6679361039399649356lu,3042075085lu,6679361039399649358lu,6679361039399649359lu,
-        0lu,6679361039399649361lu,0lu,6679361039399649363lu,0lu,0lu,6679361039399649366lu,0lu,
-        998704728lu,6679361039399649368lu,6679361039399649370lu,6679361039399649371lu,0lu,6679361039399649373lu,6679361039399649374lu,0lu,
-        6679361039399649376lu,79436257lu,6679361039399649378lu,0lu,0lu,6679361039399649381lu,0lu,6679361039399649383lu,
-        0lu,6679361039399649385lu,6679361039399649386lu,0lu,6679361039399649388lu,6679361039399649389lu,0lu,3567268847lu,
-        6679361039399649391lu,6679361039399649392lu,0lu,0lu,0lu,3282852853lu,0lu,0lu,
-        0lu,0lu,0lu,0lu,0lu,0lu,0lu,0lu
-    };
-    static const int g_1555159930_tbl_vals[128] = {
-        0,0,1,0,2,0,3,0,4,0,5,0,6,7,0,8,
-        9,0,10,0,11,0,12,0,13,14,0,15,16,0,17,0,
-        18,0,19,0,0,21,0,22,0,23,24,0,25,26,0,27,
-        0,28,0,29,0,30,0,0,32,0,33,0,34,35,0,36,
-        37,0,38,0,39,0,0,41,0,42,0,43,44,49,45,46,
-        0,47,0,48,0,0,50,0,20,51,52,53,0,54,55,0,
-        56,58,57,0,0,59,0,60,0,61,62,0,63,64,0,31,
-        65,66,0,0,0,40,0,0,0,0,0,0,0,0,0,0
-    };
-    static union param g_1555159930_params[98] = {
-        {6679361039399649284lu},{1lu},{0lu},{4lu},{2lu},{3lu},{0lu},{4lu},
-        {6lu},{6679361039399649293lu},{1lu},{1lu},{6679361039399649296lu},{16lu},{0lu},{0lu},
-        {0lu},{0lu},{1065353216lu},{1065353216lu},{1065353216lu},{1065353216lu},{0lu},{0lu},
-        {6679361039399649305lu},{1065353216lu},{1065353216lu},{1065353216lu},{1065353216lu},{0lu},{0lu},{6679361039399649308lu},
-        {0lu},{0lu},{0lu},{6679361039399649310lu},{6679361039399649392lu},{6679361039399649312lu},{1lu},{4lu},
-        {6lu},{2lu},{3lu},{0lu},{6lu},{6lu},{6679361039399649322lu},{1lu},
-        {1lu},{6679361039399649325lu},{16lu},{0lu},{25lu},{3lu},{0lu},{4lu},
-        {4lu},{4lu},{0lu},{0lu},{6lu},{6lu},{6679361039399649341lu},{1lu},
-        {1lu},{6679361039399649344lu},{0lu},{16lu},{1lu},{0lu},{6lu},{6lu},
-        {6679361039399649356lu},{1lu},{1lu},{6679361039399649359lu},{1lu},{16lu},{2lu},{0lu},
-        {6lu},{6lu},{6679361039399649371lu},{1lu},{1lu},{6679361039399649374lu},{2lu},{16lu},
-        {3lu},{0lu},{6lu},{6lu},{6679361039399649386lu},{1lu},{1lu},{6679361039399649389lu},
-        {3lu},{16lu}
-    };
-    static const unsigned char g_1555159930_data[31] = {
-        0x53,0x65,0x72,0x69,0x61,0x6c,0x69,0x7a,0x65,0x64,0x3a,0x20,0x43,0x6f,0x6d,0x70,
-        0x69,0x6c,0x65,0x20,0x54,0x69,0x6d,0x65,0x00,0x4c,0x61,0x62,0x65,0x6c,0x00
-    };
-    static struct box *g_1555159930_bfs[68];
-    static struct box g_1555159930_boxes[67];
-    static struct module g_1555159930_module;
-    static struct repository g_1555159930_repo;
-    static const struct component g_1555159930_component = {
-        1,1555159930, 18, 6,g_1555159930_elements, cntof(g_1555159930_elements),
-        g_1555159930_tbl_vals, g_1555159930_tbl_keys,cntof(g_1555159930_tbl_keys),
-        g_1555159930_data, cntof(g_1555159930_data),
-        g_1555159930_params, cntof(g_1555159930_params),
-        &g_1555159930_module, &g_1555159930_repo, g_1555159930_boxes,
-        g_1555159930_bfs, cntof(g_1555159930_boxes)
-    };
-    static const struct container g_ui_containers[] = {
-        {1555159930, 0, 6, 0, 0, &g_1555159930_component},
-    };
-    load(ctx, g_ui_containers, cntof(g_ui_containers));
+    //load(ctx, g_ui_containers, cntof(g_ui_containers));
 }
 static void
 ui_im(struct context *ctx)
 {
     /* GUI */
+    int i = 0;
     struct state *s = 0;
     if ((s = begin(ctx, id("Main")))) {
         /* Sidebar */
         {struct sidebar sb = sidebar_begin(s);
-           struct flex_box fbx = flex_box_begin(s);
-            *fbx.orientation = FLEX_BOX_VERTICAL;
-            *fbx.spacing = 6;
-                flex_box_slot_fitting(s, &fbx);
-                if (button_label_clicked(s, txt("Rebuild")))
-                    fprintf(stdout, "Rebuild pressed\n");
-            flex_box_end(s, &fbx);
+            static const char *folder[] = {"Documents", "Download", "Desktop",
+                "Images", "boot", "dev", "lib", "include", "tmp", "usr", "root"};
+
+            sborder_begin(s);
+            scroll_region_begin(s);
+
+            {struct flex_box fbx = flex_box_begin(s);
+            *fbx.flow = FLEX_BOX_WRAP;
+            for (i = 0; i < cntof(folder); ++i) {
+                flex_box_slot_static(s, &fbx, 60);
+                /* TODO(micha): should create own widget here but meh... */
+                button_begin(s); {
+                    struct sborder sbr = sborder_begin(s);
+                    *sbr.x = 6, *sbr.y = 6;
+                    {
+                        /* folder icon */
+                        struct flex_box gbx = flex_box_begin(s);
+                        *gbx.spacing = 0;
+                        *gbx.orientation = FLEX_BOX_VERTICAL;
+                        flex_box_slot_dyn(s, &gbx); {
+                            struct salign aln = salign_begin(s);
+                            *aln.horizontal = SALIGN_CENTER;
+                            *aln.vertical = SALIGN_MIDDLE; {
+                                struct icon ico = icon(s, ICON_FOLDER);
+                                *ico.size = 32;
+                            } salign_end(s);
+                        }
+                        /* folder title */
+                        flex_box_slot_fitting(s, &gbx); {
+                            struct salign aln = salign_begin(s);
+                            *aln.horizontal = SALIGN_CENTER;
+                            *aln.vertical = SALIGN_MIDDLE;
+                                label(s, txt(folder[i]));
+                            salign_end(s);
+                        } flex_box_end(s, &gbx);
+                    } sborder_end(s);
+                } button_end(s);
+            } flex_box_end(s, &fbx);}
+            scroll_region_end(s);
+            sborder_end(s);
         sidebar_end(s, &sb);}
 
         /* Panels */
         {struct overlap_box obx = overlap_box_begin(s);
         overlap_box_slot(s, &obx, id("Panels"));
-
         {struct con_box cbx = con_box_begin(s, 0, 0);
         static const struct con im_cons[] = {
             {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,600}},
@@ -6749,20 +6601,20 @@ ui_im(struct context *ctx)
 
                 /* icon buttons  */
                 flex_box_slot_fitting(s, &fbx); {
-                    struct grid_box gbx = grid_box_begin(s);
-                    grid_box_slot(s, &gbx, 0, 0);
-                    if (button_icon_clicked(s, ICON_CONFIG))
-                        fprintf(stdout, "config button clicked!\n");
-                    grid_box_slot(s, &gbx, 1, 0);
-                    if (button_icon_clicked(s, ICON_CHART_BAR))
-                        fprintf(stdout, "chart button clicked!\n");
-                    grid_box_slot(s, &gbx, 2, 0);
-                    if (button_icon_clicked(s, ICON_DESKTOP))
-                        fprintf(stdout, "desktop button clicked!\n");
-                    grid_box_slot(s, &gbx, 3, 0);
-                    if (button_icon_clicked(s, ICON_DOWNLOAD))
-                        fprintf(stdout, "download button clicked!\n");
-                    grid_box_end(s, &gbx);
+                    struct flex_box gbx = flex_box_begin(s);
+                    flex_box_slot_dyn(s, &gbx);
+                        setid(s, id("SERIALIZED_BUTTON_CONFIG"));
+                        button_icon(s, ICON_CONFIG);
+                    flex_box_slot_dyn(s, &gbx);
+                        setid(s, id("SERIALIZED_BUTTON_CHART"));
+                        button_icon(s, ICON_CHART_BAR);
+                    flex_box_slot_dyn(s, &gbx);
+                        setid(s, id("SERIALIZED_BUTTON_DESKTOP"));
+                        button_icon(s, ICON_DESKTOP);
+                    flex_box_slot_dyn(s, &gbx);
+                        setid(s, id("SERIALIZED_BUTTON_DOWNLOAD"));
+                        button_icon(s, ICON_DOWNLOAD);
+                    flex_box_end(s, &gbx);
                 }
                 /* combo */
                 flex_box_slot_fitting(s, &fbx); {
@@ -6777,32 +6629,32 @@ ui_im(struct context *ctx)
                 /* checkbox */
                 flex_box_slot_fitting(s, &fbx); {
                     static int unchecked = 0, checked = 1;
-                    struct grid_box gbx = grid_box_begin(s);
-                    grid_box_slot(s, &gbx, 0, 0);
+                    struct flex_box gbx = flex_box_begin(s);
+                    flex_box_slot_dyn(s, &gbx);
                         checkbox(s, &unchecked, "unchecked", 0);
-                    grid_box_slot(s, &gbx, 1, 0);
+                    flex_box_slot_dyn(s, &gbx);
                         checkbox(s, &checked, "checked", 0);
-                    grid_box_end(s, &gbx);
+                    flex_box_end(s, &gbx);
                 }
                 /* toggle */
                 flex_box_slot_fitting(s, &fbx); {
                     static int inactive = 0, active = 1;
-                    struct grid_box gbx = grid_box_begin(s);
-                    grid_box_slot(s, &gbx, 0, 0);
+                    struct flex_box gbx = flex_box_begin(s);
+                    flex_box_slot_dyn(s, &gbx);
                         toggle(s, &inactive, "inactive", 0);
-                    grid_box_slot(s, &gbx, 1, 0);
+                    flex_box_slot_dyn(s, &gbx);
                         toggle(s, &active, "active", 0);
-                    grid_box_end(s, &gbx);
+                    flex_box_end(s, &gbx);
                 }
                 /* radio */
                 flex_box_slot_fitting(s, &fbx); {
                     static int unselected = 0, selected = 1;
-                    struct grid_box gbx = grid_box_begin(s);
-                    grid_box_slot(s, &gbx, 0, 0);
+                    struct flex_box gbx = flex_box_begin(s);
+                    flex_box_slot(s, &gbx, 0, 0);
                         radio(s, &unselected, "unselected", 0);
-                    grid_box_slot(s, &gbx, 1, 0);
+                    flex_box_slot(s, &gbx, 1, 0);
                         radio(s, &selected, "selected", 0);
-                    grid_box_end(s, &gbx);
+                    flex_box_end(s, &gbx);
                 }
             } flex_box_end(s, &fbx);
         } panel_box_end(s, &pan, 0);
@@ -6907,6 +6759,8 @@ int main(int argc, char *argv[])
         ui_paint(vg, ctx, w, h);
         ui_clear(ctx);
         nvgEndFrame(vg);
+
+        //printf("active: %lu, hot: %lu\n", ctx->active->id, ctx->hot->id);
 
         /* Finish frame */
         SDL_GL_SwapWindow(win);
