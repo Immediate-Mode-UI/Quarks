@@ -4532,8 +4532,7 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
 
     /* reorder and rebalance overlap stack */
     {int p = 0, zorder = 0;
-    struct overlap_box obx;
-    obx = overlap_box_ref(b);
+    struct overlap_box obx = overlap_box_ref(b);
     for (i = 0, p = 1; i < *obx.cnt; ++i, p += 2) {
         uiid slot_id = *widget_get_id(b, p);
         int *slot_zorder = widget_get_int(b, p + 1);
@@ -4724,8 +4723,8 @@ con_box_layout(struct box *b, struct memory_arena *arena)
     boxes[i++] = b;
     list_foreach(it, &b->lnks)
         boxes[i++] = list_entry(it, struct box, node);
-
     box_layout(b, 0);
+
     /* evaluate conditions */
     for (i = 0; i < *cbx.cond_cnt; ++i) {
         int av = 0, bv = 0;
