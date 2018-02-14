@@ -646,11 +646,13 @@ api const char* utf_at(unsigned long *rune, int *rune_len, const char *s, int le
 #define UTF_SIZE 4
 #define UTF_INVALID 0xFFFD
 
+/* utf-8 */
 static const unsigned char utfbyte[UTF_SIZE+1] = {0x80,0,0xC0,0xE0,0xF0};
 static const unsigned char utfmask[UTF_SIZE+1] = {0xC0,0x80,0xE0,0xF0,0xF8};
 static const unsigned long utfmin[UTF_SIZE+1] = {0,0,0x80,0x800,0x10000};
 static const unsigned long utfmax[UTF_SIZE+1] = {0x10FFFF,0x7F,0x7FF,0xFFFF,0x10FFFF};
 
+/* memory */
 #define qalloc(a,sz) (a)->alloc((a)->usr, sz, __FILE__, __LINE__)
 #define qdealloc(a,ptr) (a)->dealloc((a)->usr, ptr, __FILE__, __LINE__)
 static void *dalloc(void *usr, int s, const char *file, int line){return malloc((size_t)s);}
@@ -670,6 +672,7 @@ static const struct allocator default_allocator = {0,dalloc,dfree};
 #define list_foreach_s(i,n,l) for ((i)=(l)->next,(n)=(i)->next;(i)!=(l);(i)=(n),(n)=(i)->next)
 #define list_foreach_rev_s(i,n,l) for ((i)=(l)->prev,(n)=(i)->prev;(i)!=(l);(i)=(n),(n)=(i)->prev)
 
+/* root tables */
 static const struct element g_root_elements[] = {
     /* type             id, parent, wid,            depth,flags */
     {WIDGET_ROOT,       0,  0,  WIDGET_ROOT,        0,0},
@@ -1062,20 +1065,25 @@ arena_push(struct memory_arena *a, int cnt, int size, int align)
     int valid = 0;
     assert(a);
     if (!a) return 0;
+
+    /* validate enough space */
     valid = a->blk && size_mul_add2_valid(size, cnt, a->blk->used, align);
     if (!valid || ((cnt*size) + a->blk->used + align) > a->blk->size) {
         if (!size_mul_add2_valid(size, cnt, szof(struct memory_block), align))
             return 0;
 
+        /* allocate new memory block */
         {int minsz = cnt*size + szof(struct memory_block) + align;
         int blksz = max(minsz, DEFAULT_MEMORY_BLOCK_SIZE);
         struct memory_block *blk = block_alloc(a->mem, blksz);
         assert(blk);
 
+        /* link memory block into list */
         blk->prev = a->blk;
         a->blk = blk;
         a->blkcnt++;}
     }
+    /* allocate memory from block */
     align = max(align,1);
     {struct memory_block *blk = a->blk;
     unsigned char *raw = blk->base + blk->used;
@@ -1173,6 +1181,7 @@ op_add(struct state *s, const union param *p, int cnt)
 
     {struct param_buffer *ob = s->opbuf;
     if ((s->op_idx + cnt) >= (MAX_OPS-2)) {
+        /* allocate new param buffer */
         struct param_buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
         ob->ops[s->op_idx + 0].op = OP_NEXT_BUF;
@@ -1180,6 +1189,7 @@ op_add(struct state *s, const union param *p, int cnt)
         s->op_idx = 0;
         s->opbuf = ob = b;
     } assert(s->op_idx + cnt < (MAX_OPS-2));
+    /* copy params into buffer */
     for (i = 0; i < cnt; ++i)
         ob->ops[s->op_idx++] = p[i];
     return ob->ops + (s->op_idx - cnt);}
@@ -1194,13 +1204,12 @@ store(struct state *s, const char *str, int len)
 
     {struct buffer *ob = s->buf;
     if ((s->buf_off + len) > MAX_STR_BUF-1) {
-        struct buffer *b = 0;
-        b = arena_push(&s->arena, 1, szof(*ob), 0);
+        /* allocate new data buffer */
+        struct buffer *b = arena_push(&s->arena, 1, szof(*ob), 0);
         s->buf_off = 0;
         ob->next = b;
         s->buf = ob = b;
-    }
-    assert((s->buf_off + len) <= MAX_STR_BUF-1);
+    } assert((s->buf_off + len) <= MAX_STR_BUF-1);
     copy(ob->buf + s->buf_off, str, len);
 
     off = s->buf_off;
@@ -1219,8 +1228,7 @@ pushid(struct state *s, unsigned id)
         return;
 
     idr = &s->idstk[s->stkcnt++];
-    idr->base = id;
-    idr->cnt = 0;
+    idr->base = id, idr->cnt = 0;
     s->lastid = (idr->base & 0xFFFFFFFFlu) << 32lu;
 }
 api void
@@ -1229,6 +1237,7 @@ setid(struct state *s, uiid id)
     assert(s);
     assert(s->stkcnt < cntof(s->idstk));
     if (!s) return;
+    /* set one time only ID */
     s->idstate = ID_GEN_ONE_TIME;
     s->otid = id;
 }
@@ -1239,6 +1248,7 @@ genwid(struct state *s)
     assert(s);
     if (!s) return 0;
 
+    /* generate widget ID */
     {int idx = max(0, s->stkcnt-1);
     struct idrange *idr = &s->idstk[idx];
     id |= (idr->base & 0xFFFFFFFFlu) << 32lu;
@@ -1249,6 +1259,7 @@ genwid(struct state *s)
 api uiid
 genbid(struct state *s)
 {
+    /* generate box ID */
     switch (s->idstate) {
     case ID_GEN_DEFAULT:
         return genwid(s);
@@ -1272,8 +1283,7 @@ state_find(struct context *ctx, uiid id)
     assert(ctx);
     if (!ctx) return 0;
     list_foreach(i, &ctx->states) {
-        struct state *s = 0;
-        s = list_entry(i, struct state, hook);
+        struct state *s = list_entry(i, struct state, hook);
         if (s->id == id) return s;
     } return 0;
 }
@@ -1284,8 +1294,7 @@ module_find(struct context *ctx, mid id)
     assert(ctx);
     if (!ctx) return 0;
     list_foreach(i, &ctx->mod) {
-        struct module *m = 0;
-        m = list_entry(i, struct module, hook);
+        struct module *m = list_entry(i, struct module, hook);
         if (m->id == id) return m;
     } return 0;
 }
@@ -1678,6 +1687,7 @@ widget_modifier_float(struct state *s, float *f)
 
     {struct repository *repo = s->repo;
     if (repo) {
+        /* try to find previous state and set if box is active */
         const struct context *ctx = s->ctx;
         const struct box *act = ctx->active;
         struct widget w = s->wstk[s->wtop-1];
@@ -1697,6 +1707,7 @@ widget_modifier_int(struct state *s, int *i)
 
     {struct repository *repo = s->repo;
     if (repo) {
+        /* try to find previous state and set if box is active */
         const struct context *ctx = s->ctx;
         const struct box *act = ctx->active;
         struct widget w = s->wstk[s->wtop-1];
@@ -1716,6 +1727,7 @@ widget_modifier_uint(struct state *s, unsigned *u)
 
     {struct repository *repo = s->repo;
     if (repo) {
+        /* try to find previous state and set if box is active */
         const struct context *ctx = s->ctx;
         const struct box *act = ctx->active;
         struct widget w = s->wstk[s->wtop-1];
@@ -1734,6 +1746,7 @@ widget_state_float(struct state *s, int type, float f)
     assert(s->wtop > 0);
     if (!s || s->wtop < 1) return 0;
 
+    /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
     if (!b || b->type != type)
@@ -1751,6 +1764,7 @@ widget_state_int(struct state *s, int type, int i)
     assert(s->wtop > 0);
     if (!s || s->wtop < 1) return 0;
 
+    /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
     if (!b || b->type != type)
@@ -1768,6 +1782,7 @@ widget_state_uint(struct state *s, int type, unsigned u)
     assert(s->wtop > 0);
     if (!s || s->wtop < 1) return 0;
 
+    /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
     if (!b || b->type != type)
@@ -1785,6 +1800,7 @@ widget_state_id(struct state *s, int type, uiid u)
     assert(s->wtop > 0);
     if (!s || s->wtop < 1) return 0;
 
+    /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
     if (!b || b->type != type)
@@ -1992,6 +2008,7 @@ operation_begin(union process *p, enum process_type type,
     assert(ctx);
     assert(arena);
     memset(p, 0, sizeof(*p));
+
     p->type = type;
     list_init(&p->input.evts);
     p->hdr.tmp = temp_memory_begin(arena);
@@ -2061,11 +2078,14 @@ event_begin(union process *p, enum event_type type, struct box *orig)
     union event *res = 0;
     assert(p);
     assert(orig);
+
+    /* allocate event and link into list */
     res = arena_push_type(p->hdr.arena, union event);
     assert(res);
     list_init(&res->hdr.hook);
     list_add_tail(&p->input.evts, &res->hdr.hook);
 
+    /* setup event */
     res->type = type;
     res->hdr.input = p->input.state;
     res->hdr.origin = orig;
@@ -2082,6 +2102,7 @@ event_end(union event *evt)
 intern struct list_hook*
 it(struct list_hook *list, struct list_hook *iter)
 {
+    /* list iteration */
     if (list_empty(list)) return 0;
     else if (iter && iter->next == list)
         iter = 0;
@@ -2093,6 +2114,7 @@ it(struct list_hook *list, struct list_hook *iter)
 intern struct list_hook*
 itr(struct list_hook *list, struct list_hook *iter)
 {
+    /* list reverse iteration */
     if (list_empty(list)) return 0;
     else if (iter && iter->prev == list)
         iter = 0;
@@ -2201,11 +2223,11 @@ process_begin(struct context *ctx, unsigned flags)
             else jmpto(ctx, STATE_DONE);
         }
         s = list_entry(ctx->iter, struct state, hook);
-        s->mod = module_find(ctx, s->id);
         if (s->mod) {
             s->mod->seq = ctx->seq;
             jmpto(ctx, STATE_CALC_REQ_MEMORY);
         }
+        /* allocate new module for state */
         operation_begin(p, PROC_ALLOC, ctx, &ctx->arena);
         p->mem.size = szof(struct module);
         ctx->state = STATE_ALLOC_PERSISTENT;
@@ -2217,6 +2239,7 @@ process_begin(struct context *ctx, unsigned flags)
         if (!p->mem.ptr) return p;
         assert(p->mem.ptr);
 
+        /* setup new module */
         {struct module *m = cast(struct module*, p->mem.ptr);
         assert(type_aligned(m, struct module));
         zero(m, szof(*m));
@@ -2238,7 +2261,7 @@ process_begin(struct context *ctx, unsigned flags)
         s->tblcnt = cast(int, cast(float, s->boxcnt) * 1.35f);
         s->tblcnt = npow2(s->tblcnt);
 
-        /* calculate required memory */
+        /* calculate required repository memory */
         p->mem.size = s->total_buf_size;
         p->mem.size += box_align + param_align;
         p->mem.size += repo_size + repo_align;
@@ -2371,6 +2394,7 @@ process_begin(struct context *ctx, unsigned flags)
 
             /* --------------------------- Widgets -------------------------- */
             case OP_WIDGET_BEGIN: {
+                /* push new widet on stack */
                 struct gizmo *g = &gstk[gtop++];
                 assert(gtop < MAX_TREE_DEPTH);
                 g->type = op[1].type;
@@ -2494,8 +2518,9 @@ process_begin(struct context *ctx, unsigned flags)
         } m = list_entry(ctx->iter, struct module, hook);
         assert(m);
         r = m->repo[m->repoid];
-
         assert(r);
+
+        /* blueprint request of current module repository */
         operation_begin(p, PROC_BLUEPRINT, ctx, &ctx->arena);
         p->layout.repo = r;
         p->layout.end = p->layout.inc = -1;
@@ -2522,8 +2547,9 @@ process_begin(struct context *ctx, unsigned flags)
         } m = list_entry(ctx->iter, struct module, hook);
         assert(m);
         r = m->repo[m->repoid];
-
         assert(r);
+
+        /* layout request of current module repository */
         operation_begin(p, PROC_LAYOUT, ctx, &ctx->arena);
         p->layout.end = max(0,r->boxcnt);
         p->layout.begin = 0, p->layout.inc = 1;
@@ -4283,8 +4309,7 @@ flex_box_layout(struct box *b)
     struct list_hook *it;
     struct flex_box fbx = flex_box_ref(b);
 
-    int space = 0;
-    int slot_size;
+    int space = 0, slot_size = 0;
     int varcnt = 0, staticsz = 0, fixsz = 0, maxvar = 0;
     int dynsz = 0, varsz = 0, var = 0, dyncnt = 0;
 
