@@ -6673,15 +6673,15 @@ ui_im(struct context *ctx)
 
             int i = 0;
             sborder_begin(s);
-            scroll_region_begin(s);
-            {struct flex_box fbx = flex_box_begin(s);
-            *fbx.flow = FLEX_BOX_WRAP, *fbx.padding = 0;
-            for (i = 0; i < cntof(folder); ++i) {
-                flex_box_slot_static(s, &fbx, 60);
-                if (icon_label(s, ICON_FOLDER, folder[i]))
-                    printf("Button: %s clicked\n", folder[i]);
-            } flex_box_end(s, &fbx);}
-            scroll_region_end(s);
+            scroll_region_begin(s); {
+                struct flex_box fbx = flex_box_begin(s);
+                *fbx.flow = FLEX_BOX_WRAP, *fbx.padding = 0;
+                for (i = 0; i < cntof(folder); ++i) {
+                    flex_box_slot_static(s, &fbx, 60);
+                    if (icon_label(s, ICON_FOLDER, folder[i]))
+                        printf("Button: %s clicked\n", folder[i]);
+                } flex_box_end(s, &fbx);
+            } scroll_region_end(s);
             sborder_end(s);
         sidebar_end(s, &sb);}
 
@@ -6732,7 +6732,7 @@ ui_im(struct context *ctx)
                     }
                     /* slider */
                     {static float sld_val = 5.0f;
-                    flex_box_slot_variable(s, &fbx, 30);
+                    flex_box_slot_static(s, &fbx, 30);
                     sliderf(s, 0.0f, &sld_val, 10.0f);}
 
                     /* checkbox */
