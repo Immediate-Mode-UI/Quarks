@@ -6431,7 +6431,6 @@ ui_build_retained(struct context *ctx, struct ui_retained *ui, const char *label
                 /* label button */
                 flex_box_slot_fitting(s, &fbx);
                 ui->btn = button_label(s, label, 0);
-
                 /* slider */
                 {static float sld_val = 5.0f;
                 flex_box_slot_static(s, &fbx, 30);
