@@ -647,10 +647,10 @@ api const char* utf_at(unsigned long *rune, int *rune_len, const char *s, int le
 #define UTF_INVALID 0xFFFD
 
 /* utf-8 */
-static const unsigned char utfbyte[UTF_SIZE+1] = {0x80,0,0xC0,0xE0,0xF0};
-static const unsigned char utfmask[UTF_SIZE+1] = {0xC0,0x80,0xE0,0xF0,0xF8};
-static const unsigned long utfmin[UTF_SIZE+1] = {0,0,0x80,0x800,0x10000};
-static const unsigned long utfmax[UTF_SIZE+1] = {0x10FFFF,0x7F,0x7FF,0xFFFF,0x10FFFF};
+static const unsigned char utf_byte[UTF_SIZE+1] = {0x80,0,0xC0,0xE0,0xF0};
+static const unsigned char utf_mask[UTF_SIZE+1] = {0xC0,0x80,0xE0,0xF0,0xF8};
+static const unsigned long utf_min[UTF_SIZE+1] = {0,0,0x80,0x800,0x10000};
+static const unsigned long utf_max[UTF_SIZE+1] = {0x10FFFF,0x7F,0x7FF,0xFFFF,0x10FFFF};
 
 /* memory */
 #define qalloc(a,sz) (a)->alloc((a)->usr, sz, __FILE__, __LINE__)
@@ -826,10 +826,10 @@ utf_validate(unsigned long *u, int i)
 {
     assert(u);
     if (!u) return 0;
-    if (!between(*u, utfmin[i], utfmax[i]) ||
+    if (!between(*u, utf_min[i], utf_max[i]) ||
          between(*u, 0xD800, 0xDFFF))
         *u = UTF_INVALID;
-    for (i = 1; *u > utfmax[i]; ++i);
+    for (i = 1; *u > utf_max[i]; ++i);
     return i;
 }
 intern unsigned long
@@ -837,9 +837,9 @@ utf_decode_byte(char c, int *i)
 {
     assert(i);
     if (!i) return 0;
-    for(*i = 0; *i < cntof(utfmask); ++(*i)) {
-        if (((unsigned char)c & utfmask[*i]) == utfbyte[*i])
-            return (unsigned char)(c & ~utfmask[*i]);
+    for(*i = 0; *i < cntof(utf_mask); ++(*i)) {
+        if (((unsigned char)c & utf_mask[*i]) == utf_byte[*i])
+            return (unsigned char)(c & ~utf_mask[*i]);
     } return 0;
 }
 intern int
@@ -868,7 +868,7 @@ utf_decode(unsigned long *u, const char *s, int slen)
 intern char
 utf_encode_byte(unsigned long u, int i)
 {
-    return (char)((utfbyte[i]) | ((unsigned char)u & ~utfmask[i]));
+    return (char)((utf_byte[i]) | ((unsigned char)u & ~utf_mask[i]));
 }
 intern int
 utf_encode(char *s, int cap, unsigned long u)
@@ -1186,9 +1186,10 @@ op_add(struct state *s, const union param *p, int cnt)
         b = arena_push(&s->arena, 1, szof(*ob), 0);
         ob->ops[s->op_idx + 0].op = OP_NEXT_BUF;
         ob->ops[s->op_idx + 1].p = b;
-        s->op_idx = 0;
         s->opbuf = ob = b;
+        s->op_idx = 0;
     } assert(s->op_idx + cnt < (MAX_OPS-2));
+
     /* copy params into buffer */
     for (i = 0; i < cnt; ++i)
         ob->ops[s->op_idx++] = p[i];
@@ -1212,6 +1213,7 @@ store(struct state *s, const char *str, int len)
     } assert((s->buf_off + len) <= MAX_STR_BUF-1);
     copy(ob->buf + s->buf_off, str, len);
 
+    /* store zero-terminated string */
     off = s->buf_off;
     ob->buf[s->buf_off + len] = 0;
     s->total_buf_size += len + 1;
@@ -3448,6 +3450,8 @@ enum widget_type {
     WIDGET_SCROLL_REGION,
     WIDGET_SCROLL_BOX,
     WIDGET_SCALER_BOX,
+    WIDGET_MOVABLE_BOX,
+    WIDGET_SCALABLE_BOX,
     WIDGET_TYPE_COUNT
 };
 enum widget_shortcuts {
@@ -6660,35 +6664,117 @@ icon_label(struct state *s, int icon_id, const char *lbl)
     return st.clicked;
 }
 static void
-ui_im(struct context *ctx)
+ui_siderbar(struct state *s)
 {
-    /* GUI */
+    /* Sidebar */
+    {struct sidebar sb = sidebar_begin(s);
+        static const char *folder[] = {"Documents", "Download", "Desktop",
+            "Images", "boot", "dev", "lib", "include", "tmp", "usr", "root"};
+
+        int i = 0;
+        sborder_begin(s);
+        scroll_region_begin(s); {
+            struct flex_box fbx = flex_box_begin(s);
+            *fbx.flow = FLEX_BOX_WRAP, *fbx.padding = 0;
+            for (i = 0; i < cntof(folder); ++i) {
+                flex_box_slot_static(s, &fbx, 60);
+                if (icon_label(s, ICON_FOLDER, folder[i]))
+                    printf("Button: %s clicked\n", folder[i]);
+            } flex_box_end(s, &fbx);
+        } scroll_region_end(s);
+        sborder_end(s);
+    sidebar_end(s, &sb);}
+}
+static void
+ui_im(struct state *s)
+{
+    /* Immediate mode panel */
+    struct panel pan = panel_box_begin(s, "Immediate"); {
+       struct flex_box fbx = flex_box_begin(s);
+        *fbx.orientation = FLEX_BOX_VERTICAL;
+        *fbx.spacing = 6;
+        {
+            /* label button */
+            flex_box_slot_fitting(s, &fbx);
+            if (button_label_clicked(s, txt("Label")))
+                fprintf(stdout, "Button pressed\n");
+
+            /* icon buttons  */
+            flex_box_slot_fitting(s, &fbx); {
+                struct flex_box gbx = flex_box_begin(s);
+                *gbx.padding = 0;
+                flex_box_slot_dyn(s, &gbx);
+                    if (button_icon_clicked(s, ICON_CONFIG))
+                        fprintf(stdout, "Button: Config pressed\n");
+                flex_box_slot_dyn(s, &gbx);
+                    if (button_icon_clicked(s, ICON_CHART_BAR))
+                        fprintf(stdout, "Button: Config pressed\n");
+                flex_box_slot_dyn(s, &gbx);
+                    if (button_icon_clicked(s, ICON_DESKTOP))
+                        fprintf(stdout, "Button: Config pressed\n");
+                flex_box_slot_dyn(s, &gbx);
+                    if (button_icon_clicked(s, ICON_DOWNLOAD))
+                        fprintf(stdout, "Button: Config pressed\n");
+                flex_box_end(s, &gbx);
+            }
+            /* combo */
+            flex_box_slot_fitting(s, &fbx); {
+                static const char *items[] = {"Pistol","Shotgun","Plasma","BFG"};
+                combo_box(s, id("weapons"), items, cntof(items));
+            }
+            /* slider */
+            {static float sld_val = 5.0f;
+            flex_box_slot_static(s, &fbx, 30);
+            sliderf(s, 0.0f, &sld_val, 10.0f);}
+
+            /* checkbox */
+            flex_box_slot_fitting(s, &fbx); {
+                static int unchecked = 0, checked = 1;
+                struct flex_box gbx = flex_box_begin(s);
+                *gbx.padding = 0;
+                flex_box_slot_dyn(s, &gbx);
+                    checkbox(s, &unchecked, "unchecked", 0);
+                flex_box_slot_dyn(s, &gbx);
+                    checkbox(s, &checked, "checked", 0);
+                flex_box_end(s, &gbx);
+            }
+            /* toggle */
+            flex_box_slot_fitting(s, &fbx); {
+                static int inactive = 0, active = 1;
+                struct flex_box gbx = flex_box_begin(s);
+                *gbx.padding = 0;
+                flex_box_slot_dyn(s, &gbx);
+                    toggle(s, &inactive, "inactive", 0);
+                flex_box_slot_dyn(s, &gbx);
+                    toggle(s, &active, "active", 0);
+                flex_box_end(s, &gbx);
+            }
+            /* radio */
+            flex_box_slot_fitting(s, &fbx); {
+                static int unselected = 0, selected = 1;
+                struct flex_box gbx = flex_box_begin(s);
+                *gbx.padding = 0;
+                flex_box_slot_dyn(s, &gbx);
+                    radio(s, &unselected, "unselected", 0);
+                flex_box_slot_dyn(s, &gbx);
+                    radio(s, &selected, "selected", 0);
+                flex_box_end(s, &gbx);
+            }
+        } flex_box_end(s, &fbx);
+    } panel_box_end(s, &pan, 0);
+}
+static void
+ui_main(struct context *ctx)
+{
     struct state *s = 0;
     if ((s = begin(ctx, id("Main")))) {
-        /* Sidebar */
-        {struct sidebar sb = sidebar_begin(s);
-            static const char *folder[] = {"Documents", "Download", "Desktop",
-                "Images", "boot", "dev", "lib", "include", "tmp", "usr", "root"};
-
-            int i = 0;
-            sborder_begin(s);
-            scroll_region_begin(s); {
-                struct flex_box fbx = flex_box_begin(s);
-                *fbx.flow = FLEX_BOX_WRAP, *fbx.padding = 0;
-                for (i = 0; i < cntof(folder); ++i) {
-                    flex_box_slot_static(s, &fbx, 60);
-                    if (icon_label(s, ICON_FOLDER, folder[i]))
-                        printf("Button: %s clicked\n", folder[i]);
-                } flex_box_end(s, &fbx);
-            } scroll_region_end(s);
-            sborder_end(s);
-        sidebar_end(s, &sb);}
+        ui_siderbar(s);
 
         /* Panels */
         {struct overlap_box obx = overlap_box_begin(s);
         overlap_box_slot(s, &obx, id("Immdiate Mode"));
         {
-            /* Immediate mode panel */
+            /* run: immediate mode */
             struct con_box cbx = con_box_begin(s, 0, 0);
             static const struct con cons[] = {
                 {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,600}},
@@ -6696,84 +6782,12 @@ ui_im(struct context *ctx)
                 {CON_SET, {0,ATTR_W}, {SPARENT,ATTR_W}, {0,180}},
                 {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0,250}},
             }; con_box_slot(s, &cbx, cons, cntof(cons));
-            {struct panel pan = panel_box_begin(s, "Immediate"); {
-               struct flex_box fbx = flex_box_begin(s);
-                *fbx.orientation = FLEX_BOX_VERTICAL;
-                *fbx.spacing = 6;
-                {
-                    /* label button */
-                    flex_box_slot_fitting(s, &fbx);
-                    if (button_label_clicked(s, txt("Label")))
-                        fprintf(stdout, "Button pressed\n");
-
-                    /* icon buttons  */
-                    flex_box_slot_fitting(s, &fbx); {
-                        struct flex_box gbx = flex_box_begin(s);
-                        *gbx.padding = 0;
-                        flex_box_slot_dyn(s, &gbx);
-                            if (button_icon_clicked(s, ICON_CONFIG))
-                                fprintf(stdout, "Button: Config pressed\n");
-                        flex_box_slot_dyn(s, &gbx);
-                            if (button_icon_clicked(s, ICON_CHART_BAR))
-                                fprintf(stdout, "Button: Config pressed\n");
-                        flex_box_slot_dyn(s, &gbx);
-                            if (button_icon_clicked(s, ICON_DESKTOP))
-                                fprintf(stdout, "Button: Config pressed\n");
-                        flex_box_slot_dyn(s, &gbx);
-                            if (button_icon_clicked(s, ICON_DOWNLOAD))
-                                fprintf(stdout, "Button: Config pressed\n");
-                        flex_box_end(s, &gbx);
-                    }
-                    /* combo */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static const char *items[] = {"Pistol","Shotgun","Plasma","BFG"};
-                        combo_box(s, id("weapons"), items, cntof(items));
-                    }
-                    /* slider */
-                    {static float sld_val = 5.0f;
-                    flex_box_slot_static(s, &fbx, 30);
-                    sliderf(s, 0.0f, &sld_val, 10.0f);}
-
-                    /* checkbox */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static int unchecked = 0, checked = 1;
-                        struct flex_box gbx = flex_box_begin(s);
-                        *gbx.padding = 0;
-                        flex_box_slot_dyn(s, &gbx);
-                            checkbox(s, &unchecked, "unchecked", 0);
-                        flex_box_slot_dyn(s, &gbx);
-                            checkbox(s, &checked, "checked", 0);
-                        flex_box_end(s, &gbx);
-                    }
-                    /* toggle */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static int inactive = 0, active = 1;
-                        struct flex_box gbx = flex_box_begin(s);
-                        *gbx.padding = 0;
-                        flex_box_slot_dyn(s, &gbx);
-                            toggle(s, &inactive, "inactive", 0);
-                        flex_box_slot_dyn(s, &gbx);
-                            toggle(s, &active, "active", 0);
-                        flex_box_end(s, &gbx);
-                    }
-                    /* radio */
-                    flex_box_slot_fitting(s, &fbx); {
-                        static int unselected = 0, selected = 1;
-                        struct flex_box gbx = flex_box_begin(s);
-                        *gbx.padding = 0;
-                        flex_box_slot_dyn(s, &gbx);
-                            radio(s, &unselected, "unselected", 0);
-                        flex_box_slot_dyn(s, &gbx);
-                            radio(s, &selected, "selected", 0);
-                        flex_box_end(s, &gbx);
-                    }
-                } flex_box_end(s, &fbx);
-            } panel_box_end(s, &pan, 0);
-            con_box_end(s, &cbx);}
+            ui_im(s);
+            con_box_end(s, &cbx);
         }
-        /* link: retained module */
         overlap_box_slot(s, &obx, id("Retained Mode"));
         {
+            /* link: retained module */
             struct con_box cbx = con_box_begin(s, 0, 0);
             static const struct con cons[] = {
                 {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,320}},
@@ -6784,9 +6798,9 @@ ui_im(struct context *ctx)
             link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
             con_box_end(s, &cbx);
         }
-        /* link: compile time module */
         overlap_box_slot(s, &obx, id("Compile Time"));
         {
+            /* link: compile time module */
             struct con_box cbx = con_box_begin(s, 0, 0);
             static const struct con cons[] = {
                 {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,320}},
@@ -6796,17 +6810,12 @@ ui_im(struct context *ctx)
             }; con_box_slot(s, &cbx, cons, cntof(cons));
             link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
             con_box_end(s, &cbx);
-        }
-        overlap_box_end(s, &obx);}
+        } overlap_box_end(s, &obx);}
     } end(s);
 }
 int main(int argc, char *argv[])
 {
-    enum fonts {
-        FONT_HL,
-        FONT_ICONS,
-        FONT_CNT
-    };
+    enum fonts {FONT_HL, FONT_ICONS, FONT_CNT};
     int quit = 0;
     int fnts[FONT_CNT];
     struct context *ctx;
@@ -6855,7 +6864,7 @@ int main(int argc, char *argv[])
             case SDL_QUIT: quit = 1; break;}
             ui_event(ctx, &evt);
         }}
-        ui_im(ctx);
+        ui_main(ctx);
 
         /* Process: Input */
         ui_commit(ctx);
