@@ -3432,6 +3432,7 @@ enum widget_type {
     WIDGET_OVERLAP_BOX,
     WIDGET_OVERLAP_BOX_SLOT,
     WIDGET_CON_BOX,
+    WIDGET_CON_BOX_SLOT,
     /* Container */
     WIDGET_COMBO,
     WIDGET_COMBO_POPUP,
@@ -4592,22 +4593,59 @@ struct cons {float mul; int off;};
 struct convar {int slot; int attr;};
 struct cond {unsigned char op; struct convar a, b; struct cons cons;};
 struct con {int op; struct convar dst, src; struct cons cons; int anchor, cond;};
-
+struct con_box_slot {int con_cnt, cons;};
 struct con_box {
     uiid id;
-    int *con_cnt;
     int *cond_cnt;
     int *slot_cnt;
-    union param *conds;
+    int conds;
 };
-api struct con_box
+intern struct con_box
 con_box_ref(struct box *b)
 {
     struct con_box cbx = {0};
     cbx.cond_cnt = widget_get_int(b, 0);
     cbx.slot_cnt = widget_get_int(b, 1);
-    cbx.conds = widget_get_param(b, 2);
+    cbx.conds = 2;
     return cbx;
+}
+intern struct con_box_slot
+con_box_slot_ref(struct box *b)
+{
+    struct con_box_slot cbs = {0};
+    cbs.con_cnt = *widget_get_int(b, 0);
+    cbs.cons = 1;
+    return cbs;
+}
+intern struct cond
+cond_ref(struct box *b, int off, int idx)
+{
+    struct cond c = {0};
+    off += idx * 7;
+    c.op = (unsigned char)*widget_get_int(b, off + 0);
+    c.a.slot = *widget_get_int(b, off + 1);
+    c.a.attr = *widget_get_int(b, off + 2);
+    c.b.slot = *widget_get_int(b, off + 3);
+    c.b.attr = *widget_get_int(b, off + 4);
+    c.cons.mul = *widget_get_float(b, off + 5);
+    c.cons.off = *widget_get_int(b, off + 6);
+    return c;
+}
+intern struct con
+con_ref(struct box *b, int off, int idx)
+{
+    struct con c = {0};
+    off += idx * 9;
+    c.op = *widget_get_int(b, off + 0);
+    c.dst.slot = *widget_get_int(b, off + 1);
+    c.dst.attr = *widget_get_int(b, off + 2);
+    c.src.slot = *widget_get_int(b, off + 3);
+    c.src.attr = *widget_get_int(b, off + 4);
+    c.cons.mul = *widget_get_float(b, off + 5);
+    c.cons.off = *widget_get_int(b, off + 6);
+    c.anchor = *widget_get_int(b, off + 7);
+    c.cond = *widget_get_int(b, off + 8);
+    return c;
 }
 api struct con_box
 con_box_begin(struct state *s,
@@ -4640,6 +4678,13 @@ con_box_slot(struct state *s, struct con_box *cbx,
     const struct con *cons, int con_cnt)
 {
     int i = 0;
+    if (*cbx->slot_cnt) {
+        widget_box_pop(s);
+        widget_end(s);
+    }
+    widget_begin(s, WIDGET_CON_BOX_SLOT);
+    widget_box_push(s);
+    widget_box_property_set(s, BOX_UNSELECTABLE);
     widget_param_int(s, con_cnt);
     for (i = 0; i < con_cnt; ++i) {
         const struct con *c = cons + i;
@@ -4657,6 +4702,10 @@ con_box_slot(struct state *s, struct con_box *cbx,
 api void
 con_box_end(struct state *s, struct con_box *cbx)
 {
+    if (*cbx->slot_cnt) {
+        widget_box_pop(s);
+        widget_end(s);
+    }
     widget_box_pop(s);
     widget_end(s);
 }
@@ -4741,7 +4790,7 @@ box_attr_set(struct box *b, int attr, int anchor, int val)
 api void
 con_box_layout(struct box *b, struct memory_arena *arena)
 {
-    int poff, j, i = 0;
+    int i = 0;
     struct list_hook *it = 0;
     struct con_box cbx = con_box_ref(b);
     struct temp_memory tmp = temp_memory_begin(arena);
@@ -4758,20 +4807,21 @@ con_box_layout(struct box *b, struct memory_arena *arena)
     for (i = 0; i < *cbx.cond_cnt; ++i) {
         int av = 0, bv = 0;
         const struct box *dst, *src;
-        union param *p = cbx.conds + i*7;
+        struct cond c = cond_ref(b, cbx.conds, i);
 
-        /* condition left operand */
-        assert(p[1].i < *cbx.cond_cnt);
-        dst = boxes[p[1].i + 1];
-        av = box_attr_get(dst, p[2].i);
+        /* extract left operand */
+        assert(c.a.slot < *cbx.cond_cnt);
+        dst = boxes[c.a.slot + 1];
+        av = box_attr_get(dst, c.a.attr);
 
-        /* condition right operand */
-        assert(p[3].i < *cbx.cond_cnt);
-        src = boxes[p[3].i + 1];
-        bv = box_attr_get(src, p[4].i);
+        /* extract right operand */
+        assert(c.b.slot < *cbx.cond_cnt);
+        src = boxes[c.b.slot + 1];
+        bv = box_attr_get(src, c.b.attr);
+        bv = roundi(cast(float, bv) * c.cons.mul) + c.cons.off;
 
-        /* eval condition */
-        switch (p[0].i) {
+        /* eval operation */
+        switch (c.op) {
         case COND_EQ: res[i+1] = (av == bv); break;
         case COND_NE: res[i+1] = (av != bv); break;
         case COND_GR: res[i+1] = (av >  bv); break;
@@ -4780,34 +4830,35 @@ con_box_layout(struct box *b, struct memory_arena *arena)
         case COND_LE: res[i+1] = (av <= bv); break;}
     }
     /* evaluate constraints */
-    for (i = 0, poff = 2 + (*cbx.cond_cnt * 7); i < *cbx.slot_cnt; ++i) {
-        int *con_cnt = widget_get_int(b, poff++);
-        for (j = 0; j < *con_cnt; ++j) {
+    list_foreach(it, &b->lnks) {
+        struct box *sb = list_entry(it, struct box, node);
+        struct con_box_slot slot = con_box_slot_ref(sb);
+        for (i = 0; i < slot.con_cnt; ++i) {
             struct box *dst, *src;
-            union param *p = widget_get_param(b, (j * 9) + poff);
-            assert((p[8].i < *cbx.cond_cnt) || (!(*cbx.cond_cnt)));
-            if (*cbx.cond_cnt && (res[p[8].i] >= *cbx.cond_cnt))
+            struct con c = con_ref(sb, slot.cons, i);
+            assert((c.cond < *cbx.cond_cnt) || (!(*cbx.cond_cnt)));
+            if (*cbx.cond_cnt && (c.cond >= *cbx.cond_cnt))
                 continue;
 
-            /* left value */
+            /* destination value */
             {int av = 0, bv = 0, v = 0;
-            assert(p[1].i < *cbx.slot_cnt);
-            dst = boxes[p[1].i + 1];
-            av = box_attr_get(dst, p[2].i);
+            assert(c.dst.slot < *cbx.slot_cnt);
+            dst = boxes[c.dst.slot + 1];
+            av = box_attr_get(dst, c.dst.attr);
 
-            /* right value */
-            assert(p[3].i < *cbx.slot_cnt);
-            src = boxes[p[3].i + 1];
-            bv = box_attr_get(src, p[4].i);
-            v = roundi(cast(float, bv) * p[5].f) + p[6].i;
+            /* source value */
+            assert(c.src.slot < *cbx.slot_cnt);
+            src = boxes[c.src.slot + 1];
+            bv = box_attr_get(src, c.src.attr);
+            v = roundi(cast(float, bv) * c.cons.mul) + c.cons.off;
 
             /* eval attribute */
-            switch (p[0].i) {
+            switch (c.op) {
             case CON_NOP: break;
-            case CON_SET: box_attr_set(dst, p[2].i, p[7].i, v); break;
-            case CON_MIN: box_attr_set(dst, p[2].i, p[7].i, min(av, v)); break;
-            case CON_MAX: box_attr_set(dst, p[2].i, p[7].i, max(av, v)); break;}}
-        } poff += *con_cnt * 9;
+            case CON_SET: box_attr_set(dst, c.dst.attr, c.anchor, v); break;
+            case CON_MIN: box_attr_set(dst, c.dst.attr, c.anchor, min(av, v)); break;
+            case CON_MAX: box_attr_set(dst, c.dst.attr, c.anchor, max(av, v)); break;}}
+        }
     } temp_memory_end(tmp);
 
     /* reshape after contents */
@@ -5122,6 +5173,57 @@ scaler_box_input(struct box *b, union event *evt)
     if (in->shortcuts[SHORTCUT_SCALER_BOX_SCALE_Y].down ||
         in->shortcuts[SHORTCUT_SCALER_BOX_SCALE].down)
         *sb.scale_y = -evt->scroll.y * 0.1f;
+}
+/* ---------------------------------------------------------------------------
+ *                              MOVABLE BOX
+ * --------------------------------------------------------------------------- */
+struct movable_box {
+    uiid id;
+    int *x;
+    int *y;
+};
+api struct movable_box
+movable_box_ref(struct box *b)
+{
+    struct movable_box mbx = {0};
+    mbx.x = widget_get_int(b, 0);
+    mbx.y = widget_get_int(b, 1);
+    return mbx;
+}
+api struct movable_box
+movable_box_begin(struct state *s, int x, int y)
+{
+    struct movable_box mbx = {0};
+    widget_begin(s, WIDGET_SCALER_BOX);
+    mbx.id = widget_box_push(s);
+    widget_box_property_set(s, BOX_MOVABLE);
+    mbx.x = widget_state_int(s, x);
+    mbx.y = widget_state_int(s, y);
+    return mbx;
+}
+api void
+movable_box_end(struct state *s)
+{
+    widget_box_pop(s);
+    widget_end(s);
+}
+api void
+movable_box_layout(struct box *b)
+{
+    int w = 0, h = 0;
+    struct list_hook *i = 0;
+    struct movable_box mbx = movable_box_ref(b);
+    list_foreach(i, &b->lnks) {
+        struct box *n = list_entry(i, struct box, node);
+        n->x = *mbx.x, n->y = *mbx.y;
+        n->w = n->dw, n->h = n->dh;
+        w = max(w, n->w), h = max(h, n->h);
+    }
+}
+api void
+movable_box_input(struct box *b, union event *evt)
+{
+
 }
 /* ---------------------------------------------------------------------------
  *                              BUTTON_ICON
@@ -6496,10 +6598,10 @@ ui_load_serialized_tables(struct context *ctx)
 {
     static const struct element g_1555159930_elements[] = {
         {1048584, 0lu, 0lu, 0lu, 0, 7, 0, 0, 0},
-        {22, 6679361039399649282lu, 0lu, 6679361039399649281lu, 1, 8, 0, 0, 0},
+        {23, 6679361039399649282lu, 0lu, 6679361039399649281lu, 1, 8, 0, 0, 0},
         {13, 6679361039399649284lu, 6679361039399649282lu, 6679361039399649283lu, 2, 9, 0, 0, 0},
         {14, 6679361039399649286lu, 6679361039399649284lu, 6679361039399649285lu, 3, 10, 0, 6, 0},
-        {23, 6679361039399649288lu, 6679361039399649286lu, 6679361039399649287lu, 4, 11, 0, 8, 0},
+        {24, 6679361039399649288lu, 6679361039399649286lu, 6679361039399649287lu, 4, 11, 0, 8, 0},
         {12, 6679361039399649290lu, 6679361039399649288lu, 6679361039399649289lu, 5, 12, 0, 8, 0},
         {10, 6679361039399649292lu, 6679361039399649290lu, 6679361039399649291lu, 6, 13, 0, 8, 0},
         {10, 6679361039399649293lu, 6679361039399649292lu, 6679361039399649291lu, 7, 14, 0, 8, 0},
@@ -6507,12 +6609,12 @@ ui_load_serialized_tables(struct context *ctx)
         {11, 6679361039399649296lu, 6679361039399649295lu, 6679361039399649294lu, 9, 16, 0, 11, 0},
         {1, 6679361039399649298lu, 6679361039399649296lu, 6679361039399649297lu, 10, 17, 0, 14, 0},
         {14, 6679361039399649300lu, 6679361039399649284lu, 6679361039399649299lu, 3, 10, 0, 17, 0},
-        {32, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 4, 11, 0, 19, 0},
+        {33, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 4, 11, 0, 19, 0},
         {9, 6679361039399649304lu, 6679361039399649302lu, 6679361039399649303lu, 5, 12, 0, 19, 0},
         {9, 6679361039399649305lu, 6679361039399649304lu, 6679361039399649303lu, 6, 13, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 19, 0},
         {9, 6679361039399649307lu, 6679361039399649302lu, 6679361039399649306lu, 5, 12, 0, 26, 0},
         {9, 6679361039399649308lu, 6679361039399649307lu, 6679361039399649306lu, 6, 13, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 26, 0},
-        {31, 6679361039399649310lu, 6679361039399649302lu, 6679361039399649309lu, 5, 12, 0, 33, 0},
+        {32, 6679361039399649310lu, 6679361039399649302lu, 6679361039399649309lu, 5, 12, 0, 33, 0},
         {13, 6679361039399649312lu, 6679361039399649310lu, 6679361039399649311lu, 6, 13, 0, 38, 0},
         {14, 6679361039399649314lu, 6679361039399649312lu, 6679361039399649313lu, 7, 14, 0, 44, 0},
         {3, 998704728lu, 6679361039399649314lu, 6679361039399649315lu, 8, 15, 0, 46, 0},
@@ -6561,7 +6663,7 @@ ui_load_serialized_tables(struct context *ctx)
         {11, 6679361039399649388lu, 6679361039399649386lu, 6679361039399649387lu, 15, 22, 0, 103, 0},
         {11, 6679361039399649389lu, 6679361039399649388lu, 6679361039399649387lu, 16, 23, 0, 103, 0},
         {0, 6679361039399649391lu, 6679361039399649389lu, 6679361039399649390lu, 17, 24, 0, 106, 0},
-        {31, 6679361039399649392lu, 6679361039399649310lu, 6679361039399649309lu, 6, 13, 0|BOX_IMMUTABLE, 33, 0},
+        {32, 6679361039399649392lu, 6679361039399649310lu, 6679361039399649309lu, 6, 13, 0|BOX_IMMUTABLE, 33, 0},
     };
     static const uiid g_1555159930_tbl_keys[128] = {
         0lu,0lu,6679361039399649282lu,0lu,6679361039399649284lu,0lu,6679361039399649286lu,0lu,
@@ -6810,7 +6912,8 @@ ui_main(struct context *ctx)
             }; con_box_slot(s, &cbx, cons, cntof(cons));
             link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
             con_box_end(s, &cbx);
-        } overlap_box_end(s, &obx);}
+        }
+        overlap_box_end(s, &obx);}
     } end(s);
 }
 int main(int argc, char *argv[])
