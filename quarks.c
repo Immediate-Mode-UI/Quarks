@@ -609,10 +609,10 @@ api float* widget_modifier_float(struct state *s, float *f);
 api int* widget_modifier_int(struct state *s, int *i);
 api unsigned* widget_modifier_uint(struct state *s, unsigned *u);
 
-api float* widget_state_float(struct state *s, int type, float f);
-api int* widget_state_int(struct state *s, int type, int i);
-api unsigned* widget_state_uint(struct state *s, int type, unsigned u);
-api uiid* widget_state_id(struct state *s, int type, uiid u);
+api float* widget_state_float(struct state *s, float f);
+api int* widget_state_int(struct state *s, int i);
+api unsigned* widget_state_uint(struct state *s, unsigned u);
+api uiid* widget_state_id(struct state *s, uiid u);
 
 api float *widget_get_float(struct box *b, int idx);
 api int *widget_get_int(struct box *b, int idx);
@@ -1738,7 +1738,7 @@ widget_modifier_uint(struct state *s, unsigned *u)
     } return widget_param_uint(s, *u);}
 }
 api float*
-widget_state_float(struct state *s, int type, float f)
+widget_state_float(struct state *s, float f)
 {
     const struct box *b;
     struct widget w;
@@ -1751,12 +1751,12 @@ widget_state_float(struct state *s, int type, float f)
     /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
-    if (!b || b->type != type)
+    if (!b || b->type != w.type)
         return widget_param_float(s, f);
     return widget_param_float(s, b->params[*w.argc].f);
 }
 api int*
-widget_state_int(struct state *s, int type, int i)
+widget_state_int(struct state *s, int i)
 {
     const struct box *b = 0;
     struct widget w;
@@ -1769,12 +1769,12 @@ widget_state_int(struct state *s, int type, int i)
     /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
-    if (!b || b->type != type)
+    if (!b || b->type != w.type)
         return widget_param_int(s, i);
     return widget_param_int(s, b->params[*w.argc].i);
 }
 api unsigned*
-widget_state_uint(struct state *s, int type, unsigned u)
+widget_state_uint(struct state *s, unsigned u)
 {
     const struct box *b;
     struct widget w;
@@ -1787,12 +1787,12 @@ widget_state_uint(struct state *s, int type, unsigned u)
     /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
-    if (!b || b->type != type)
+    if (!b || b->type != w.type)
         return widget_param_uint(s, u);
     return widget_param_uint(s, b->params[*w.argc].u);
 }
 api uiid*
-widget_state_id(struct state *s, int type, uiid u)
+widget_state_id(struct state *s, uiid u)
 {
     const struct box *b;
     struct widget w;
@@ -1805,7 +1805,7 @@ widget_state_id(struct state *s, int type, uiid u)
     /* try to find and set previous state */
     w = s->wstk[s->wtop-1];
     b = poll(s, w.id + 1);
-    if (!b || b->type != type)
+    if (!b || b->type != w.type)
         return widget_param_id(s, u);
     return widget_param_id(s, b->params[*w.argc].id);
 }
@@ -3900,7 +3900,7 @@ combo_begin(struct state *s, mid id)
     struct combo c = {0};
     widget_begin(s, WIDGET_COMBO);
     c.id = widget_box_push(s);
-    c.state = widget_state_int(s, WIDGET_COMBO, COMBO_COLLAPSED);
+    c.state = widget_state_int(s, COMBO_COLLAPSED);
     c.popup = widget_param_mid(s, id);
     return c;
 }
@@ -4489,7 +4489,7 @@ overlap_box_slot(struct state *s, struct overlap_box *obx, mid id)
     slot_id = widget_box_push(s);
     widget_box_property_set(s, BOX_UNSELECTABLE);
     widget_param_id(s, slot_id);
-    widget_state_int(s, WIDGET_OVERLAP_BOX, 0);
+    widget_state_int(s, 0);
     *obx->cnt += 1;
 }
 api void
@@ -4880,9 +4880,9 @@ scroll_region_begin(struct state *s)
     if (!s) return sr;
 
     widget_begin(s, WIDGET_SCROLL_REGION);
-    sr.dir = widget_state_int(s, WIDGET_SCROLL_REGION, SCROLL_DEFAULT);
-    sr.off_x = widget_state_float(s, WIDGET_SCROLL_REGION, 0);
-    sr.off_y = widget_state_float(s, WIDGET_SCROLL_REGION, 0);
+    sr.dir = widget_state_int(s, SCROLL_DEFAULT);
+    sr.off_x = widget_state_float(s, 0);
+    sr.off_y = widget_state_float(s, 0);
     sr.id = widget_box_push(s);
     widget_param_id(s, sr.id);
     return sr;
@@ -5089,8 +5089,8 @@ scaler_box_begin(struct state *s)
     if (!s) return sb;
 
     widget_begin(s, WIDGET_SCALER_BOX);
-    sb.scale_x = widget_state_float(s, WIDGET_SCALER_BOX, 1);
-    sb.scale_y = widget_state_float(s, WIDGET_SCALER_BOX, 1);
+    sb.scale_x = widget_state_float(s, 1);
+    sb.scale_y = widget_state_float(s, 1);
     sb.id = widget_box_push(s);
     widget_param_id(s, sb.id);
     return sb;
@@ -5382,7 +5382,7 @@ combo_box_begin(struct state *s, mid id)
     widget_box_push(cbx.ps);
     widget_param_mid(cbx.ps, s->id);
     widget_param_id(cbx.ps, cid);
-    cbx.selid = widget_state_id(cbx.ps, WIDGET_COMBO_BOX_POPUP, 0);
+    cbx.selid = widget_state_id(cbx.ps, 0);
     cbx.lblid = widget_param_id(cbx.ps, 0);
 
     /* setup popup layout */
@@ -5632,8 +5632,8 @@ sidebar_begin(struct state *s)
 
     widget_begin(s, WIDGET_SIDEBAR);
     sb.id = widget_box_push(s);
-    sb.state = widget_state_int(s, WIDGET_SIDEBAR, SIDEBAR_CLOSED);
-    sb.ratio = widget_state_float(s, WIDGET_SIDEBAR, 0.5f);
+    sb.state = widget_state_int(s, SIDEBAR_CLOSED);
+    sb.ratio = widget_state_float(s, 0.5f);
     sb.icon = widget_param_int(s, ICON_SIDEBAR_LOCK);
     sb.total = widget_param_int(s, 0);
     sidebar_validate_icon(&sb);
@@ -6708,13 +6708,13 @@ ui_im(struct state *s)
                         fprintf(stdout, "Button: Config pressed\n");
                 flex_box_slot_dyn(s, &gbx);
                     if (button_icon_clicked(s, ICON_CHART_BAR))
-                        fprintf(stdout, "Button: Config pressed\n");
+                        fprintf(stdout, "Button: Chart pressed\n");
                 flex_box_slot_dyn(s, &gbx);
                     if (button_icon_clicked(s, ICON_DESKTOP))
-                        fprintf(stdout, "Button: Config pressed\n");
+                        fprintf(stdout, "Button: Desktop pressed\n");
                 flex_box_slot_dyn(s, &gbx);
                     if (button_icon_clicked(s, ICON_DOWNLOAD))
-                        fprintf(stdout, "Button: Config pressed\n");
+                        fprintf(stdout, "Button: Download pressed\n");
                 flex_box_end(s, &gbx);
             }
             /* combo */
