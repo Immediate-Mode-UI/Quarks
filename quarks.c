@@ -4518,6 +4518,7 @@ overlap_box_layout(struct box *b, struct memory_arena *arena)
         int slot_zorder = *widget_get_int(n, 1);
         slot_cnt = max(slot_zorder, slot_cnt);
     } slot_cnt += 1;
+
     /* allocate and setup temp sorting array */
     boxes = arena_push_array(arena, slot_cnt, struct box*);
     list_foreach_s(it, sit, &b->lnks) {
@@ -5515,6 +5516,7 @@ combo_box_begin(struct state *s, mid id)
     widget_param_id(cbx.ps, cid);
     cbx.selid = widget_state_id(cbx.ps, 0);
     cbx.lblid = widget_param_id(cbx.ps, 0);
+    button_begin(s);
 
     /* setup popup layout */
     cbx.fbx = flex_box_begin(cbx.ps);
@@ -5537,26 +5539,24 @@ combo_box_item(struct state *s, struct combo_box *cbx, const char *item, const c
     }
     if (lbl.id == *cbx->selid) {
         /* combo header */
-        button_begin(s); {
-            struct flex_box fb = flex_box_begin(s);
-            flex_box_slot_dyn(s, &fb); {
-                /* selected item label */
-                struct sborder sb = sborder_begin(s);
-                *sb.x = *sb.y = 2;
-                    lbl = label(s, item, end);
-                    *cbx->lblid = lbl.id;
-                sborder_end(s);
-            }
-            flex_box_slot_fitting(s, &fb); {
-                /* down arrow icon */
-                struct sbox x = sbox_begin(s);
-                *x.align.horizontal = SALIGN_CENTER;
-                *x.align.vertical = SALIGN_MIDDLE;
-                *x.border.x = *x.border.y = 2;
-                    icon(s, ICON_COMBO_CARRET_DOWN);
-                sbox_end(s);
-            } flex_box_end(s, &fb);
-        } button_end(s);
+        struct flex_box fb = flex_box_begin(s);
+        flex_box_slot_dyn(s, &fb); {
+            /* selected item label */
+            struct sborder sb = sborder_begin(s);
+            *sb.x = *sb.y = 2;
+                lbl = label(s, item, end);
+                *cbx->lblid = lbl.id;
+            sborder_end(s);
+        }
+        flex_box_slot_fitting(s, &fb); {
+            /* down arrow icon */
+            struct sbox x = sbox_begin(s);
+            *x.align.horizontal = SALIGN_CENTER;
+            *x.align.vertical = SALIGN_MIDDLE;
+            *x.border.x = *x.border.y = 2;
+                icon(s, ICON_COMBO_CARRET_DOWN);
+            sbox_end(s);
+        } flex_box_end(s, &fb);
         selected = 1;
     } return selected;
 }
@@ -5568,6 +5568,7 @@ combo_box_end(struct state *s, struct combo_box *cbx)
     widget_box_pop(cbx->ps);
     widget_end(cbx->ps);
     combo_popup_end(cbx->ps, &cbx->combo);
+    button_end(s);
     combo_end(s);
 
     /* finish combo box */
