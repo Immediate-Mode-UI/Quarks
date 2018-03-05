@@ -2054,16 +2054,22 @@ intern struct box*
 at(struct box *b, int mx, int my)
 {
     struct list_hook *i = b->lnks.prev;
-    r:while (&b->lnks != i) {
-        struct box *sub = list_entry(i, struct box, node);
-        if ((sub->flags & BOX_IMMUTABLE) || (sub->flags & BOX_HIDDEN)) goto n;
-        if (inbox(mx, my, sub->x, sub->y, sub->w, sub->h))
-            {b = sub; i = b->lnks.prev; goto r;}
-        n:i = i->prev;
-    }
-    if (b->flags & BOX_UNSELECTABLE)
-        {i = b->node.prev; b = b->parent; goto r;}
-    return b;
+    while (1) {
+        while (&b->lnks != i) {
+            struct box *sub = list_entry(i, struct box, node);
+            if (!(sub->flags & BOX_IMMUTABLE) && !(sub->flags & BOX_HIDDEN)) {
+                if (inbox(mx, my, sub->x, sub->y, sub->w, sub->h)) {
+                    b = sub;
+                    i = b->lnks.prev;
+                    continue;
+                }
+            } i = i->prev;
+        }
+        if (b->flags & BOX_UNSELECTABLE){
+            i = b->node.prev;
+            b = b->parent;
+        } else break;
+    } return b;
 }
 intern void
 event_add_box(union event *evt, struct box *box)
@@ -2565,10 +2571,12 @@ process_begin(struct context *ctx, unsigned flags)
         if (in->resized) {
             /* window resize */
             struct box *root = ctx->tree;
+            int w = root->w, h = root->h;
+            root->w = in->width;
+            root->h = in->height;
+
             in->resized = 0;
-            root->w = root->w = in->width;
-            root->h = root->h = in->height;
-            if (root->w != in->width || root->h != in->height)
+            if (w != in->width || h != in->height)
                 jmpto(ctx, STATE_BLUEPRINT);
         } operation_begin(p, PROC_INPUT, ctx, &ctx->arena);
         p->input.state = in;
@@ -4087,7 +4095,7 @@ salign_layout(struct box *b)
         list_foreach(h, &b->lnks) {
             struct box *n = list_entry(h, struct box, node);
             n->w = max((b->x + b->w) - n->x, 0);
-            n->w = min(b->w, n->dw);
+            n->w = min(n->w, n->dw);
             n->x = max(b->x, (b->x + b->w/2) - n->w/2);
         } break;
     case SALIGN_RIGHT:
@@ -5173,99 +5181,6 @@ zoom_box_input(struct box *b, union event *evt)
         in->shortcuts[SHORTCUT_ZOOM_BOX_SCALE].down)
         *sb.scale_y = -evt->scroll.y * 0.1f;
 }
-/* ---------------------------------------------------------------------------
- *                              MOVABLE BOX
- * --------------------------------------------------------------------------- */
-struct movable_box {
-    uiid id;
-    int *x;
-    int *y;
-};
-api struct movable_box
-movable_box_ref(struct box *b)
-{
-    struct movable_box mbx = {0};
-    mbx.x = widget_get_int(b, 0);
-    mbx.y = widget_get_int(b, 1);
-    return mbx;
-}
-api struct movable_box
-movable_box_begin(struct state *s, int x, int y)
-{
-    struct movable_box mbx = {0};
-    widget_begin(s, WIDGET_SCALABLE_BOX);
-    mbx.id = widget_box_push(s);
-    widget_box_property_set(s, BOX_MOVABLE);
-    mbx.x = widget_state_int(s, x);
-    mbx.y = widget_state_int(s, y);
-    return mbx;
-}
-api void
-movable_box_end(struct state *s)
-{
-    widget_box_pop(s);
-    widget_end(s);
-}
-api void
-movable_box_layout(struct box *b)
-{
-    int w = 0, h = 0;
-    struct list_hook *i = 0;
-    struct movable_box mbx = movable_box_ref(b);
-    list_foreach(i, &b->lnks) {
-        struct box *n = list_entry(i, struct box, node);
-        n->w = n->dw, n->h = n->dh;
-        n->x = *mbx.x, n->y = *mbx.y;
-        w = max(w, n->w), h = max(h, n->h);
-    }
-}
-api void
-movable_box_input(struct box *b, union event *evt)
-{
-
-}
-/* ---------------------------------------------------------------------------
- *                              SCALABLE BOX
- * --------------------------------------------------------------------------- */
-struct scalable_box {
-    uiid id;
-    int *w;
-    int *h;
-};
-api struct scalable_box
-scalable_box_ref(struct box *b)
-{
-    struct scalable_box sbx = {0};
-    sbx.w = widget_get_int(b, 0);
-    sbx.h = widget_get_int(b, 1);
-    return sbx;
-}
-api struct scalable_box
-scalable_box_begin(struct state *s, int w, int h)
-{
-    struct scalable_box sbx = {0};
-    widget_begin(s, WIDGET_SCALABLE_BOX);
-    sbx.w = widget_state_int(s, w);
-    sbx.h = widget_state_int(s, h);
-    return sbx;
-}
-api void
-scalable_box_blueprint(struct box *b)
-{
-
-}
-api void
-scalable_box_layout(struct box *b)
-{
-
-}
-api void
-scalable_box_end(struct state *s)
-{
-    widget_box_pop(s);
-    widget_end(s);
-}
-
 /* ---------------------------------------------------------------------------
  *                              BUTTON_ICON
  * --------------------------------------------------------------------------- */
