@@ -6653,12 +6653,12 @@ ui_load_serialized_tables(struct context *ctx)
         {9, 6679361039399649296lu, 6679361039399649295lu, 6679361039399649294lu, 9, 16, 0, 11, 0},
         {1, 6679361039399649298lu, 6679361039399649296lu, 6679361039399649297lu, 10, 17, 0, 14, 0},
         {12, 6679361039399649300lu, 6679361039399649284lu, 6679361039399649299lu, 3, 10, 0, 17, 0},
-        {31, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 4, 11, 0, 19, 0},
+        {32, 6679361039399649302lu, 6679361039399649300lu, 6679361039399649301lu, 4, 11, 0, 19, 0},
         {7, 6679361039399649304lu, 6679361039399649302lu, 6679361039399649303lu, 5, 12, 0, 19, 0},
         {7, 6679361039399649305lu, 6679361039399649304lu, 6679361039399649303lu, 6, 13, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 19, 0},
         {7, 6679361039399649307lu, 6679361039399649302lu, 6679361039399649306lu, 5, 12, 0, 26, 0},
         {7, 6679361039399649308lu, 6679361039399649307lu, 6679361039399649306lu, 6, 13, 0|BOX_MOVABLE_X|BOX_MOVABLE_Y, 26, 0},
-        {30, 6679361039399649310lu, 6679361039399649302lu, 6679361039399649309lu, 5, 12, 0, 33, 0},
+        {31, 6679361039399649310lu, 6679361039399649302lu, 6679361039399649309lu, 5, 12, 0, 33, 0},
         {11, 6679361039399649312lu, 6679361039399649310lu, 6679361039399649311lu, 6, 13, 0, 38, 0},
         {12, 6679361039399649314lu, 6679361039399649312lu, 6679361039399649313lu, 7, 14, 0, 44, 0},
         {2, 998704728lu, 6679361039399649314lu, 6679361039399649315lu, 8, 15, 0, 46, 0},
@@ -6702,7 +6702,7 @@ ui_load_serialized_tables(struct context *ctx)
         {9, 6679361039399649378lu, 6679361039399649376lu, 6679361039399649377lu, 14, 21, 0, 103, 0},
         {9, 6679361039399649379lu, 6679361039399649378lu, 6679361039399649377lu, 15, 22, 0, 103, 0},
         {0, 6679361039399649381lu, 6679361039399649379lu, 6679361039399649380lu, 16, 23, 0, 106, 0},
-        {30, 6679361039399649382lu, 6679361039399649310lu, 6679361039399649309lu, 6, 13, 0|BOX_IMMUTABLE, 33, 0},
+        {31, 6679361039399649382lu, 6679361039399649310lu, 6679361039399649309lu, 6, 13, 0|BOX_IMMUTABLE, 33, 0},
     };
     static const uiid g_1555159930_tbl_keys[128] = {
         0lu,0lu,6679361039399649282lu,0lu,6679361039399649284lu,0lu,6679361039399649286lu,0lu,
@@ -6827,7 +6827,7 @@ ui_sidebar(struct state *s)
     sidebar_end(s, &sb);}
 }
 static void
-ui_im(struct state *s)
+ui_immedate_mode(struct state *s)
 {
     /* Immediate mode panel */
     struct panel pan = panel_box_begin(s, "Immediate"); {
@@ -6910,70 +6910,23 @@ ui_main(struct context *ctx)
     struct state *s = 0;
     if ((s = begin(ctx, id("Main")))) {
         ui_sidebar(s);
-
+        /* Panels */
         {struct overlap_box obx = overlap_box_begin(s);
-        overlap_box_slot(s, &obx, id("Immdiate Mode"));
-        {
-            /* run: immediate mode */
+        overlap_box_slot(s, &obx, id("Immdiate Mode")); {
             window_begin(s, 600, 50, 180, 250);
-            ui_im(s);
+            ui_immedate_mode(s);
             window_end(s);
         }
-        overlap_box_slot(s, &obx, id("Retained Mode"));
-        {
-            /* link: retained module */
+        overlap_box_slot(s, &obx, id("Retained Mode")); {
             window_begin(s, 320, 50, 200, 130);
             link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
             window_end(s);
         }
-
-
-#if 0
-        /* Panels */
-        {struct overlap_box obx = overlap_box_begin(s);
-        overlap_box_slot(s, &obx, id("Immdiate Mode"));
-        {
-            /* run: immediate mode */
-            struct con_box cbx = con_box_begin(s, 0, 0);
-            static const struct con cons[] = {
-                {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,600}},
-                {CON_SET, {0,ATTR_T}, {SPARENT,ATTR_T}, {1,50}},
-                {CON_SET, {0,ATTR_W}, {SPARENT,ATTR_W}, {0,180}},
-                {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0,250}},
-            }; con_box_slot(s, &cbx, cons, cntof(cons));
-            ui_im(s);
-            con_box_end(s, &cbx);
-        }
-        overlap_box_slot(s, &obx, id("Retained Mode"));
-        {
-            /* link: retained module */
-            struct con_box cbx = con_box_begin(s, 0, 0);
-            static const struct con cons[] = {
-                {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,320}},
-                {CON_SET, {0,ATTR_T}, {SPARENT,ATTR_T}, {1,50}},
-                {CON_SET, {0,ATTR_W}, {SPARENT,ATTR_W}, {0,200}},
-                {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0,130}},
-            }; con_box_slot(s, &cbx, cons, cntof(cons));
-            link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
-            con_box_end(s, &cbx);
-        }
-#endif
-
-#if 0
-        overlap_box_slot(s, &obx, id("Compile Time"));
-        {
-            /* link: compile time module */
-            struct con_box cbx = con_box_begin(s, 0, 0);
-            static const struct con cons[] = {
-                {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,320}},
-                {CON_SET, {0,ATTR_T}, {SPARENT,ATTR_T}, {1,250}},
-                {CON_SET, {0,ATTR_W}, {SPARENT,ATTR_W}, {0,200}},
-                {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0,130}}
-            }; con_box_slot(s, &cbx, cons, cntof(cons));
+        overlap_box_slot(s, &obx, id("Compile Time")); {
+            window_begin(s, 320, 250, 200, 130);
             link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
-            con_box_end(s, &cbx);
+            window_end(s);
         }
-#endif
         overlap_box_end(s, &obx);}
     } end(s);
 }
@@ -7011,12 +6964,10 @@ int main(int argc, char *argv[])
     ctx = create(DEFAULT_ALLOCATOR, &cfg);}
     input_resize(ctx, 1000, 600);
 
-#if 0
     if (argc > 1) {
         ui_build_serialized_tables(stdout);
         return 0;
     } else ui_load_serialized_tables(ctx);
-#endif
     ui_build_retained(ctx, &ui, "Initial");
 
     while (!quit) {
