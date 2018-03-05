@@ -3452,6 +3452,7 @@ enum widget_type {
     WIDGET_SIDEBAR_BAR,
     WIDGET_SIDEBAR_SCALER,
     WIDGET_SIDEBAR_CONTENT,
+    WIDGET_WINDOW,
     /* Transformation */
     WIDGET_CLIP_BOX,
     WIDGET_SCROLL_REGION,
@@ -4462,14 +4463,28 @@ flex_box_layout(struct box *b)
  * --------------------------------------------------------------------------- */
 struct overlap_box {
     uiid id;
+    int slots;
     int *cnt;
+};
+struct overlap_box_slot {
+    uiid *id;
+    int *zorder;
 };
 api struct overlap_box
 overlap_box_ref(struct box *b)
 {
     struct overlap_box obx = {0};
     obx.cnt = widget_get_int(b, 0);
+    obx.slots = 1;
     return obx;
+}
+intern struct overlap_box_slot
+overlap_box_slot_ref(struct box *b)
+{
+    struct overlap_box_slot slot;
+    slot.id = widget_get_id(b, 0);
+    slot.zorder = widget_get_int(b, 1);
+    return slot;
 }
 api struct overlap_box
 overlap_box_begin(struct state *s)
@@ -4523,29 +4538,31 @@ overlap_box_layout(struct box *b, struct memory_arena *arena)
     /* find maximum zorder */
     list_foreach(it, &b->lnks) {
         struct box *n = list_entry(it, struct box, node);
-        int slot_zorder = *widget_get_int(n, 1);
-        slot_cnt = max(slot_zorder, slot_cnt);
+        struct overlap_box_slot s = overlap_box_slot_ref(n);
+        slot_cnt = max(*s.zorder, slot_cnt);
     } slot_cnt += 1;
 
     /* allocate and setup temp sorting array */
     boxes = arena_push_array(arena, slot_cnt, struct box*);
     list_foreach_s(it, sit, &b->lnks) {
         struct box *n = list_entry(it, struct box, node);
-        int zorder = *widget_get_int(n, 1);
-        if (!zorder) continue;
+        struct overlap_box_slot s = overlap_box_slot_ref(n);
+        if (!*s.zorder) continue;
         list_del(&n->node);
-        boxes[zorder] = n;
+        boxes[*s.zorder] = n;
     }
+
     /* add boxes back in sorted order */
     for (i = slot_cnt-1; i >= 0; --i) {
         if (!boxes[i]) continue;
         list_add_head(&b->lnks, &boxes[i]->node);
     } i = 1;
+
     /* set correct zorder for each child box */
     list_foreach(it, &b->lnks) {
         struct box *n = list_entry(it, struct box, node);
-        int *zorder = widget_get_int(n, 1);
-        *zorder = i++;
+        struct overlap_box_slot s = overlap_box_slot_ref(n);
+        *s.zorder = i++;
     } temp_memory_end(tmp);
 }
 api void
@@ -4553,38 +4570,40 @@ overlap_box_input(struct box *b, union event *evt, struct memory_arena *arena)
 {
     int i = 0;
     struct box *slot = 0;
-    if (evt->type != EVT_CLICKED)
+    struct list_hook *it = 0;
+    if (evt->type != EVT_PRESSED)
         return;
 
     /* find clicked on slot */
     for (i = 0; i < evt->hdr.cnt; ++i) {
         struct box *s = evt->hdr.boxes[i];
-        struct list_hook *it = 0;
         list_foreach(it, &b->lnks) {
             struct box *n = list_entry(it, struct box, node);
             if (n != s) continue;
             slot = n; break;
         }
+        if (slot) break;
     } if (!slot) return;
 
     /* reorder and rebalance overlap stack */
-    {int p = 0, zorder = 0;
+    {int zorder = 0;
     struct overlap_box obx = overlap_box_ref(b);
-    for (i = 0, p = 1; i < *obx.cnt; ++i, p += 2) {
-        uiid slot_id = *widget_get_id(b, p);
-        int *slot_zorder = widget_get_int(b, p + 1);
-        if (slot_id != slot->id) continue;
+    list_foreach(it, &b->lnks) {
+        struct box *n = list_entry(it, struct box, node);
+        struct overlap_box_slot s = overlap_box_slot_ref(n);
+        if (*s.id != slot->id) continue;
 
-        zorder = *slot_zorder;
-        *slot_zorder = *obx.cnt + 1;
+        zorder = *s.zorder;
+        *s.zorder = *obx.cnt+1;
         break;
     }
     /* set each slots zorder */
-    for (i = 0, p = 2; i < *obx.cnt; ++i, p += 2) {
-        int *slot_zorder = widget_get_int(b, p);
-        if (*slot_zorder > zorder)
-            *slot_zorder -= 1;
-    }} overlap_box_layout(b, arena);
+    list_foreach(it, &b->lnks) {
+        struct box *n = list_entry(it, struct box, node);
+        struct overlap_box_slot s = overlap_box_slot_ref(n);
+        if (*s.zorder > zorder)
+            *s.zorder -= 1;
+    } overlap_box_layout(b, arena);}
 }
 /* ---------------------------------------------------------------------------
  *                          CONSTRAINT BOX
@@ -5672,7 +5691,7 @@ sidebar_begin(struct state *s)
     sb.cbx = con_box_begin(s, 0, 0);
     {static const struct con sb_cons[] = {
         {CON_SET, {0,ATTR_W}, {SPARENT,ATTR_W}, {0.5f,0}},
-        {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0.8f,0}},
+        {CON_SET, {0,ATTR_H}, {SPARENT,ATTR_H}, {0.6f,0}},
         {CON_SET, {0,ATTR_L}, {SPARENT,ATTR_L}, {1,0}, ATTR_W},
         {CON_SET, {0,ATTR_CY}, {SPARENT,ATTR_CY}, {1,0}, ATTR_H}
     }; con_box_slot(s, &sb.cbx, sb_cons, cntof(sb_cons));}
@@ -5739,7 +5758,7 @@ sidebar_layout(struct box *b)
     struct box *bc = list_entry(hc, struct box, node);
 
     /* bar */
-    bb->w = 18, bb->h = ceili(cast(float,b->h)*0.8f);
+    bb->w = 18, bb->h = b->h;
     bb->x = b->x, bb->y = (b->y + b->h/2) - (bb->h/2);
 
     /* scaler */
@@ -5834,6 +5853,82 @@ sidebar_scaler_input(struct box *b, union event *evt)
         *sb.ratio = clamp(0.2f, *sb.ratio, 1.0f);
     } break;}
     sidebar_validate_icon(&sb);
+}
+/* ---------------------------------------------------------------------------
+ *                              WINDOW
+ * --------------------------------------------------------------------------- */
+struct window {
+    uiid id;
+    int *x;
+    int *y;
+    int *w;
+    int *h;
+};
+api struct window
+window_ref(struct box *b)
+{
+    struct window win = {0};
+    win.x = widget_get_int(b, 0);
+    win.y = widget_get_int(b, 1);
+    win.w = widget_get_int(b, 2);
+    win.h = widget_get_int(b, 3);
+    return win;
+}
+api struct window
+window_begin(struct state *s, int x, int y, int w, int h)
+{
+    struct window win = {0};
+    widget_begin(s, WIDGET_WINDOW);
+    win.id = widget_box_push(s);
+    win.x = widget_state_int(s, x);
+    win.y = widget_state_int(s, y);
+    win.w = widget_state_int(s, w);
+    win.h = widget_state_int(s, h);
+    return win;
+}
+api void
+window_end(struct state *s)
+{
+    widget_box_pop(s);
+    widget_end(s);
+}
+api void
+window_blueprint(struct box *b)
+{
+    struct window win = window_ref(b);
+    b->dw = *win.w;
+    b->dh = *win.h;
+}
+api void
+window_layout(struct box *b)
+{
+    struct window win = window_ref(b);
+    b->x = *win.x;
+    b->y = *win.y;
+    b->w = *win.w;
+    b->h = *win.h;
+    box_layout(b, 0);
+}
+api void
+window_input(struct context *ctx, struct box *b, const union event *evt)
+{
+    int i = 0;
+    struct window win;
+    if (evt->type != EVT_DRAGGED) return;
+    if (evt->hdr.origin != b) {
+        for (i = 0; i < evt->hdr.cnt; i++) {
+            struct box *n = evt->hdr.boxes[i];
+            switch (n->type) {
+            default: break;
+            case WIDGET_PANEL_HEADER: goto move;}
+        } return;
+    }
+move:
+    win = window_ref(b);
+    b->moved = 1;
+    *win.x += evt->dragged.x;
+    *win.y += evt->dragged.y;
+    ctx->unbalanced = 1;
 }
 
 /* ===========================================================================
@@ -6254,6 +6349,7 @@ ui_blueprint(struct NVGcontext *vg, union process *p, struct box *b)
     case WIDGET_SBORDER: sborder_blueprint(b); break;
     case WIDGET_FLEX_BOX: flex_box_blueprint(b); break;
     case WIDGET_SCROLL_BOX: scroll_box_blueprint(b); break;
+    case WIDGET_WINDOW: window_blueprint(b); break;
     default: blueprint(p, b); break;}
 }
 static void
@@ -6272,6 +6368,7 @@ ui_layout(struct NVGcontext *vg, union process *p, struct box *b)
     case WIDGET_SCROLL_REGION: scroll_region_layout(b); break;
     case WIDGET_SCROLL_BOX: scroll_box_layout(b); break;
     case WIDGET_SIDEBAR: sidebar_layout(b); break;
+    case WIDGET_WINDOW: window_layout(b); break;
     default: layout(p, b); break;}
 }
 static void
@@ -6291,10 +6388,12 @@ ui_input(union process *p, union event *evt)
         case WIDGET_SCROLL: scroll_input(b, evt); break;
         case WIDGET_SCROLL_REGION: scroll_region_input(b, evt); break;
         case WIDGET_SCROLL_BOX: scroll_box_input(ctx, b, evt); break;
+        case WIDGET_OVERLAP_BOX: overlap_box_input(b, evt, p->hdr.arena); break;
         case WIDGET_ZOOM_BOX: zoom_box_input(b, evt); break;
         case WIDGET_SIDEBAR: sidebar_input(b, evt); break;
         case WIDGET_SIDEBAR_BAR: sidebar_bar_input(b, evt); break;
         case WIDGET_SIDEBAR_SCALER: sidebar_scaler_input(b, evt); break;
+        case WIDGET_WINDOW: window_input(ctx, b, evt); break;
         default: input(p, evt, b); break;}
     }
 }
@@ -6706,7 +6805,7 @@ icon_label(struct state *s, int icon_id, const char *lbl)
     return st.clicked;
 }
 static void
-ui_siderbar(struct state *s)
+ui_sidebar(struct state *s)
 {
     /* Sidebar */
     {struct sidebar sb = sidebar_begin(s);
@@ -6810,8 +6909,26 @@ ui_main(struct context *ctx)
 {
     struct state *s = 0;
     if ((s = begin(ctx, id("Main")))) {
-        ui_siderbar(s);
+        ui_sidebar(s);
 
+        {struct overlap_box obx = overlap_box_begin(s);
+        overlap_box_slot(s, &obx, id("Immdiate Mode"));
+        {
+            /* run: immediate mode */
+            window_begin(s, 600, 50, 180, 250);
+            ui_im(s);
+            window_end(s);
+        }
+        overlap_box_slot(s, &obx, id("Retained Mode"));
+        {
+            /* link: retained module */
+            window_begin(s, 320, 50, 200, 130);
+            link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
+            window_end(s);
+        }
+
+
+#if 0
         /* Panels */
         {struct overlap_box obx = overlap_box_begin(s);
         overlap_box_slot(s, &obx, id("Immdiate Mode"));
@@ -6840,6 +6957,9 @@ ui_main(struct context *ctx)
             link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
             con_box_end(s, &cbx);
         }
+#endif
+
+#if 0
         overlap_box_slot(s, &obx, id("Compile Time"));
         {
             /* link: compile time module */
@@ -6853,6 +6973,7 @@ ui_main(struct context *ctx)
             link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
             con_box_end(s, &cbx);
         }
+#endif
         overlap_box_end(s, &obx);}
     } end(s);
 }
@@ -6890,10 +7011,12 @@ int main(int argc, char *argv[])
     ctx = create(DEFAULT_ALLOCATOR, &cfg);}
     input_resize(ctx, 1000, 600);
 
+#if 0
     if (argc > 1) {
         ui_build_serialized_tables(stdout);
         return 0;
     } else ui_load_serialized_tables(ctx);
+#endif
     ui_build_retained(ctx, &ui, "Initial");
 
     while (!quit) {
