@@ -17,6 +17,7 @@
 #define intern static
 #define unused(a) ((void)a)
 #define cast(t,p) ((t)(p))
+#define ucast(p) ((uintptr_t)p)
 #define flag(n) ((1u)<<(n))
 #define szof(a) ((int)sizeof(a))
 #define min(a,b) ((a)<(b)?(a):(b))
@@ -778,6 +779,26 @@ intern int
 roundi(float x)
 {
     return cast(int, roundf(x));
+}
+api int
+strn(const char *s)
+{
+    const char *a = s;
+    const unsigned *w;
+    if (!s) return 0;
+
+    #define UONES (((unsigned)-1)/UCHAR_MAX)
+    #define UHIGHS (UONES * (UCHAR_MAX/2+1))
+    #define UHASZERO(x) ((x)-UONES & ~(x) & UHIGHS)
+
+    for (;ucast(s)&3; ++s) if (!*s) return (int)(s-a);
+    for (w = (const void*)s; !UHASZERO(*w); ++w);
+    for (s = (const void*)w; *s; ++s);
+    return (int)(s-a);
+
+    #undef UONES
+    #undef UHIGHS
+    #undef UHASZERO
 }
 intern int
 size_add_valid(int a, int b)
@@ -3082,6 +3103,7 @@ process_begin(struct context *ctx, unsigned flags)
             m->repo[m->repoid] = 0;
             return p;
         } m->repo[m->repoid] = 0;
+
         if (m->repo[!m->repoid] && m->repo[!m->repoid]->size) {
             operation_begin(p, PROC_FREE_FRAME, ctx, &ctx->arena);
             p->mem.ptr = m->repo[!m->repoid];
@@ -3387,10 +3409,10 @@ input_text(struct context *ctx, const char *buf, const char *end)
     int len = 0;
     struct input *in = 0;
     assert(ctx);
-    if (!ctx) return;
+    if (!ctx || !buf) return;
     in = &ctx->input;
 
-    len = (end) ? cast(int, end-buf): (int)strlen(buf);
+    len = (end) ? cast(int, end-buf): (int)strn(buf);
     if (in->text_len + len + 1 >= cntof(in->text))
         return;
 
@@ -3519,7 +3541,7 @@ label(struct state *s, const char *txt, const char *end)
     lbl.id = widget_box_push(s);
     widget_box_pop(s);
 
-    len = (end) ? cast(int, (end-txt)): (int)strlen(txt);
+    len = (end) ? cast(int, (end-txt)): (int)strn(txt);
     lbl.height = widget_param_int(s, cfg->font_default_height);
     lbl.font = widget_param_int(s, cfg->font_default_id);
     lbl.txt = widget_param_str(s, txt, len);
@@ -3530,7 +3552,7 @@ api void
 label_blueprint(struct box *b, void *usr, text_measure_f measure)
 {
     struct label lbl = label_ref(b);
-    int len = cast(int, strlen(lbl.txt));
+    int len = cast(int, strn(lbl.txt));
     b->dw = measure(usr, *lbl.font, *lbl.height, lbl.txt, len);
     b->dh = *lbl.height;
 }
@@ -3577,7 +3599,6 @@ icon_layout(struct box *b)
     struct icon ico = icon_ref(b);
     *ico.size = min(b->w, b->h);
 }
-
 /* ---------------------------------------------------------------------------
  *                                  BUTTON
  * --------------------------------------------------------------------------- */
