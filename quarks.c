@@ -6951,6 +6951,76 @@ ui_main(struct context *ctx)
         overlap_box_end(s, &obx);}
     } end(s);
 }
+static void
+ui_update(struct context *ctx, struct NVGcontext *vg, struct ui_retained *ui)
+{
+    /* Process: Input */
+    ui_commit(ctx);
+    {int i; union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_INPUT))) {
+        switch (p->type) {default:break;
+        case PROC_BLUEPRINT: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc)
+                ui_blueprint(vg, p, op->boxes[i]);
+        } break;
+        case PROC_LAYOUT: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc)
+                ui_layout(vg, p, op->boxes[i]);
+        } break;
+        case PROC_INPUT: {
+            struct list_hook *it = 0;
+            struct process_input *op = &p->input;
+            list_foreach(it, &op->evts) {
+                union event *evt = list_entry(it, union event, hdr.hook);
+                ui_input(p, evt); /* handle widget internal events */
+
+                switch (evt->type) {
+                case EVT_CLICKED: {
+                    /* event driven input handling */
+                    for (i = 0; i < evt->hdr.cnt; i++) {
+                        struct box *b = evt->hdr.boxes[i];
+                        switch (b->type) {
+                        case WIDGET_BUTTON: {
+                            if (b->id == id("SERIALIZED_BUTTON"))
+                                fprintf(stdout, "serial button clicked\n");
+                            else if (b->id == id("SERIALIZED_BUTTON_CONFIG"))
+                                fprintf(stdout, "serial button: config clicked\n");
+                            else if (b->id == id("SERIALIZED_BUTTON_CHART"))
+                                fprintf(stdout, "serial button: chart clicked\n");
+                            else if (b->id == id("SERIALIZED_BUTTON_DESKTOP"))
+                                fprintf(stdout, "serial button: desktop clicked\n");
+                            else if (b->id == id("SERIALIZED_BUTTON_DOWNLOAD"))
+                                fprintf(stdout, "serial button: download clicked\n");
+                        } break;}
+                    }
+                } break;}
+            }
+        } break;}
+        process_end(p);
+    }}
+    /* event handling by polling */
+    {
+        /* button */
+        {struct button_state btn = {0};
+        button_label_query(ctx, &btn, ui->id, &ui->btn);
+        if (btn.clicked) fprintf(stdout, "Retained button clicked\n");
+        if (btn.pressed) fprintf(stdout, "Retained button pressed\n");
+        if (btn.released) fprintf(stdout, "Retained button released\n");
+        if (btn.entered) fprintf(stdout, "Retained button entered\n");
+        if (btn.exited) fprintf(stdout, "Retained button exited\n");}
+
+        /* slider */
+        {struct slider_state sld = {0};
+        slider_query(ctx, ui->id, &sld, &ui->sld);
+        if (sld.value_changed)
+            fprintf(stdout, "Retained slider value changed: %.2f\n", *ui->sld.value);
+        if (sld.entered) fprintf(stdout, "Retained slider entered\n");
+        if (sld.exited) fprintf(stdout, "Retained slider exited\n");}
+    }
+}
+
 int main(int argc, char *argv[])
 {
     enum fonts {FONT_HL, FONT_ICONS, FONT_CNT};
@@ -7003,72 +7073,8 @@ int main(int argc, char *argv[])
             ui_event(ctx, &evt);
         }}
         ui_main(ctx);
+        ui_update(ctx, vg, &ui);
 
-        /* Process: Input */
-        ui_commit(ctx);
-        {int i; union process *p = 0;
-        while ((p = process_begin(ctx, PROCESS_INPUT))) {
-            switch (p->type) {default:break;
-            case PROC_BLUEPRINT: {
-                struct process_layouting *op = &p->layout;
-                for (i = op->begin; i != op->end; i += op->inc)
-                    ui_blueprint(vg, p, op->boxes[i]);
-            } break;
-            case PROC_LAYOUT: {
-                struct process_layouting *op = &p->layout;
-                for (i = op->begin; i != op->end; i += op->inc)
-                    ui_layout(vg, p, op->boxes[i]);
-            } break;
-            case PROC_INPUT: {
-                struct list_hook *it = 0;
-                struct process_input *op = &p->input;
-                list_foreach(it, &op->evts) {
-                    union event *evt = list_entry(it, union event, hdr.hook);
-                    ui_input(p, evt); /* handle widget internal events */
-
-                    switch (evt->type) {
-                    case EVT_CLICKED: {
-                        /* event driven input handling */
-                        for (i = 0; i < evt->hdr.cnt; i++) {
-                            struct box *b = evt->hdr.boxes[i];
-                            switch (b->type) {
-                            case WIDGET_BUTTON: {
-                                if (b->id == id("SERIALIZED_BUTTON"))
-                                    fprintf(stdout, "serial button clicked\n");
-                                else if (b->id == id("SERIALIZED_BUTTON_CONFIG"))
-                                    fprintf(stdout, "serial button: config clicked\n");
-                                else if (b->id == id("SERIALIZED_BUTTON_CHART"))
-                                    fprintf(stdout, "serial button: chart clicked\n");
-                                else if (b->id == id("SERIALIZED_BUTTON_DESKTOP"))
-                                    fprintf(stdout, "serial button: desktop clicked\n");
-                                else if (b->id == id("SERIALIZED_BUTTON_DOWNLOAD"))
-                                    fprintf(stdout, "serial button: download clicked\n");
-                            } break;}
-                        }
-                    } break;}
-                }
-            } break;}
-            process_end(p);
-        }}
-        /* event handling by polling */
-        {
-            /* button */
-            {struct button_state btn = {0};
-            button_label_query(ctx, &btn, ui.id, &ui.btn);
-            if (btn.clicked) fprintf(stdout, "Retained button clicked\n");
-            if (btn.pressed) fprintf(stdout, "Retained button pressed\n");
-            if (btn.released) fprintf(stdout, "Retained button released\n");
-            if (btn.entered) fprintf(stdout, "Retained button entered\n");
-            if (btn.exited) fprintf(stdout, "Retained button exited\n");}
-
-            /* slider */
-            {struct slider_state sld = {0};
-            slider_query(ctx, ui.id, &sld, &ui.sld);
-            if (sld.value_changed)
-                fprintf(stdout, "Retained slider value changed: %.2f\n", *ui.sld.value);
-            if (sld.entered) fprintf(stdout, "Retained slider entered\n");
-            if (sld.exited) fprintf(stdout, "Retained slider exited\n");}
-        }
         /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
         glClearColor(0.10f, 0.18f, 0.24f, 1);
