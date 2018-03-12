@@ -3047,65 +3047,6 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
         process_end(p);
     }
 }
-#if 0
-static void
-ui_commit(struct context *ctx)
-{
-    {union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_COMMIT))) {
-        switch (p->type) {default: break;
-        case PROC_ALLOC_FRAME:
-        case PROC_ALLOC: p->mem.ptr = calloc((size_t)p->mem.size,1); break;}
-        process_end(p);
-    }}
-}
-static void
-ui_clear(struct context *ctx)
-{
-    union process *p = 0;
-    assert(ctx);
-    if (!ctx) return;
-    while ((p = process_begin(ctx, PROCESS_CLEAR))) {
-        switch (p->type) {
-        case PROC_FREE_FRAME:
-        case PROC_FREE: free(p->mem.ptr); break;}
-        process_end(p);
-    }
-}
-static void
-ui_cleanup(struct context *ctx)
-{
-    union process *p = 0;
-    assert(ctx);
-    if (!ctx) return;
-    while ((p = process_begin(ctx, PROCESS_CLEANUP))) {
-        switch (p->type) {
-        case PROC_FREE_FRAME:
-        case PROC_FREE: free(p->mem.ptr); break;}
-        process_end(p);
-    } destroy(ctx);
-}
-static void
-ui_dump(struct context *ctx, FILE *fp, const char *name)
-{
-    union process *p = 0;
-    assert(ctx);
-    assert(fp);
-    assert(name);
-    if (!ctx || !fp || !name)
-        return;
-
-    while ((p = process_begin(ctx, PROCESS_SERIALIZE))) {
-        struct process_serialize *serial = &p->serial;
-        serial->type = SERIALIZE_TABLES;
-        serial->file = fp;
-        serial->name = name;
-        serial->indent = 4;
-        process_end(p);
-    }
-}
-#endif
-
 static void
 ui_event(struct context *ctx, const SDL_Event *evt)
 {
@@ -3592,7 +3533,6 @@ ui_update(struct context *ctx, struct NVGcontext *vg, struct ui_retained *ui)
         if (sld.exited) fprintf(stdout, "Retained slider exited\n");}
     }
 }
-
 int main(int argc, char *argv[])
 {
     enum fonts {FONT_HL, FONT_ICONS, FONT_CNT};
