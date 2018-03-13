@@ -604,7 +604,6 @@ op_add(struct state *s, const union param *p, int cnt)
 intern const char*
 store(struct state *s, const char *str, int len)
 {
-    int off = 0;
     assert(s && str);
     assert(s->buf);
     assert(len < MAX_STR_BUF-1);
@@ -620,11 +619,11 @@ store(struct state *s, const char *str, int len)
     copy(ob->buf + s->buf_off, str, len);
 
     /* store zero-terminated string */
-    off = s->buf_off;
+    {int off = s->buf_off;
     ob->buf[s->buf_off + len] = 0;
     s->total_buf_size += len + 1;
     s->buf_off += len + 1;
-    return ob->buf + off;}
+    return ob->buf + off;}}
 }
 /* ---------------------------------------------------------------------------
  *                                  IDs
