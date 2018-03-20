@@ -529,24 +529,25 @@ temp_memory_end(struct temp_memory tmp)
  *                              Hash-Table
  * --------------------------------------------------------------------------- */
 intern void
-insert(struct table *tbl, uiid id, int val)
+insert(struct table *t, uiid key, int val)
 {
-    uiid cnt = cast(uiid, tbl->cnt);
-    uiid idx = id & (cnt-1), begin = idx;
-    do {uiid key = tbl->keys[idx];
-        if (key) continue;
-        tbl->keys[idx] = id;
-        tbl->vals[idx] = val; return;
-    } while ((idx = ((idx+1) & (cnt-1))) != begin);
+    uiid n = cast(uiid, t->cnt);
+    uiid i = key & (n-1), b = i;
+    do {uiid k = t->keys[i];
+        if (k) continue;
+        t->keys[i] = key;
+        t->vals[i] = val;
+        return;
+    } while ((i = ((i+1) & (n-1))) != b);
 }
 intern int
-lookup(struct table *tbl, uiid id)
+lookup(struct table *t, uiid key)
 {
-    uiid key, cnt = cast(uiid, tbl->cnt);
-    uiid idx = id & (cnt-1), begin = idx;
-    do {if (!(key = tbl->keys[idx])) return 0;
-        if (key == id) return tbl->vals[idx];
-    } while ((idx = ((idx+1) & (cnt-1))) != begin);
+    uiid k, n = cast(uiid, t->cnt);
+    uiid i = key & (n-1), b = i;
+    do {if (!(k = t->keys[i])) return 0;
+        if (k == key) return t->vals[i];
+    } while ((i = ((i+1) & (n-1))) != b);
     return 0;
 }
 /* ---------------------------------------------------------------------------
@@ -959,7 +960,7 @@ popup_show(struct context *ctx, mid id, enum visibility vis)
 api void
 widget_begin(struct state *s, int type)
 {
-    struct widget *w;
+    struct widget *w = 0;
     union param p[3], *q = 0;
     assert(s);
     if (!s) return;
