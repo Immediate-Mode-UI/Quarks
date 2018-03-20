@@ -876,17 +876,17 @@ end(struct state *s)
 api void
 slot(struct state *s, uiid id)
 {
+    union param p[4];
     assert(s);
     assert(s->wtop > 0);
     if (!s || s->wtop <= 0) return;
 
-    {union param p[4];
     widget_begin(s, WIDGET_SLOT);
     p[0].op = OP_BOX_PUSH;
     p[1].id = id;
     p[2].id = s->wstk[s->wtop-1].id;
     p[3].op = OP_BOX_POP;
-    op_add(s, p, cntof(p));}
+    op_add(s, p, cntof(p));
     widget_end(s);
 }
 /* ---------------------------------------------------------------------------
@@ -959,9 +959,11 @@ popup_show(struct context *ctx, mid id, enum visibility vis)
 api void
 widget_begin(struct state *s, int type)
 {
+    struct widget *w;
+    union param p[3], *q = 0;
     assert(s);
     if (!s) return;
-    {union param p[3], *q;
+
     p[0].op = OP_WIDGET_BEGIN;
     p[1].type = type;
     p[2].i = 0;
@@ -969,38 +971,39 @@ widget_begin(struct state *s, int type)
     assert(q);
 
     assert(s->wtop < cntof(s->wstk));
-    s->wstk[s->wtop].id = genwid(s);
-    s->wstk[s->wtop].argc = &q[2].i;
-    s->wstk[s->wtop].type = type;
-    s->wtop++;}
+    w = s->wstk + s->wtop++;
+    w->id = genwid(s);
+    w->argc = &q[2].i;
+    w->type = type;
 }
 api void
 widget_end(struct state *s)
 {
+    union param p[1];
     assert(s);
     assert(s->wtop > 0);
     if (!s || s->wtop <= 0) return;
-    {union param p[1];
+
     p[0].op = OP_WIDGET_END;
-    op_add(s, p, cntof(p));}
+    op_add(s, p, cntof(p));
     s->wtop = max(s->wtop-1, 0);
 }
 api uiid
 widget_box_push(struct state *s)
 {
+    union param p[3];
     assert(s);
     if (!s) return 0;
 
-    {union param p[3];
     p[0].op = OP_BOX_PUSH;
     p[1].id = genbid(s);
     p[2].id = s->wstk[s->wtop-1].id;
     op_add(s, p, cntof(p));
 
     s->depth++;
-    s->tree_depth = max(s->depth, s->tree_depth);
     s->boxcnt++;
-    return p[1].id;}
+    s->tree_depth = max(s->depth, s->tree_depth);
+    return p[1].id;
 }
 api uiid
 widget_box(struct state *s)
@@ -1012,13 +1015,14 @@ widget_box(struct state *s)
 api void
 widget_box_pop(struct state *s)
 {
+    union param p[1];
     assert(s);
     if (!s) return;
-    {union param p[1];
+
     p[0].op = OP_BOX_POP;
     op_add(s, p, cntof(p));
     assert(s->depth);
-    s->depth = max(s->depth-1, 0);}
+    s->depth = max(s->depth-1, 0);
 }
 api void
 widget_box_property_set(struct state *s, enum properties prop)
