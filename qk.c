@@ -451,6 +451,19 @@ free_blocks(struct block_allocator *a)
 /* ---------------------------------------------------------------------------
  *                                  Arena
  * --------------------------------------------------------------------------- */
+intern void
+arena_grow(struct memory_arena *a, int minsz)
+{
+    /* allocate new memory block */
+    int blksz = max(minsz, DEFAULT_MEMORY_BLOCK_SIZE);
+    struct memory_block *blk = block_alloc(a->mem, blksz);
+    assert(blk);
+
+    /* link memory block into list */
+    blk->prev = a->blk;
+    a->blk = blk;
+    a->blkcnt++;
+}
 api void*
 arena_push(struct memory_arena *a, int cnt, int size, int align)
 {
@@ -463,17 +476,7 @@ arena_push(struct memory_arena *a, int cnt, int size, int align)
     if (!valid || ((cnt*size) + a->blk->used + align) > a->blk->size) {
         if (!size_mul_add2_valid(size, cnt, szof(struct memory_block), align))
             return 0;
-
-        /* allocate new memory block */
-        {int minsz = cnt*size + szof(struct memory_block) + align;
-        int blksz = max(minsz, DEFAULT_MEMORY_BLOCK_SIZE);
-        struct memory_block *blk = block_alloc(a->mem, blksz);
-        assert(blk);
-
-        /* link memory block into list */
-        blk->prev = a->blk;
-        a->blk = blk;
-        a->blkcnt++;}
+        arena_grow(a, cnt*size + szof(struct memory_block) + align);
     }
     /* allocate memory from block */
     align = max(align,1);
@@ -1489,8 +1492,9 @@ process_begin(struct context *ctx, unsigned flags)
         STATE_ALLOC_TEMPORARY, STATE_COMPILE,
         STATE_BLUEPRINT, STATE_LAYOUTING, STATE_TRANSFORM,
         STATE_INPUT, STATE_PAINT,
+        STATE_TRACE_DISPATCH, STATE_TRACE,
         STATE_SERIALIZE, STATE_SERIALIZE_DISPATCH,
-        STATE_SERIALIZE_TRACE, STATE_SERIALIZE_TABLE, STATE_SERIALIZE_BINARY,
+        STATE_SERIALIZE_TABLE, STATE_SERIALIZE_BINARY,
         STATE_CLEAR, STATE_GC, STATE_CLEANUP, STATE_DONE
     };
     static const struct opdef {
@@ -1510,7 +1514,9 @@ process_begin(struct context *ctx, unsigned flags)
     if (!ctx) return 0;
     r:switch (ctx->state) {
     case STATE_DISPATCH: {
-        if (flags & flag(PROC_CLEANUP))
+        if (flags & flag(PROC_TRACE))
+            jmpto(ctx, STATE_TRACE_DISPATCH);
+        else if (flags & flag(PROC_CLEANUP))
             jmpto(ctx, STATE_CLEANUP);
         else if (flags & flag(PROC_CLEAR))
             jmpto(ctx, STATE_GC);
@@ -1531,8 +1537,7 @@ process_begin(struct context *ctx, unsigned flags)
                     for (i = 0; i < r->boxcnt; ++i) {
                         /* reset box input state */
                         struct box *b = r->boxes + i;
-                        b->hovered = 0;
-                        b->entered = b->exited = 0;
+                        b->hovered = b->entered = b->exited = 0;
                         b->drag_end = b->moved = 0;
                         b->pressed = b->released = 0;
                         b->clicked = b->scrolled = 0;
@@ -2180,6 +2185,52 @@ process_begin(struct context *ctx, unsigned flags)
         else ctx->state = STATE_DONE;
         return p;
     }
+    case STATE_TRACE_DISPATCH: {
+        union process *p = &ctx->proc;
+        operation_begin(p, PROC_FILL_TRACE_CONFIG, ctx, &ctx->arena);
+        ctx->state = STATE_TRACE;
+        return p;
+    }
+    case STATE_TRACE: {
+        struct list_hook *si = 0;
+        union process *p = &ctx->proc;
+        FILE *fp = p->trace.file;
+        if (!fp) return p;
+
+        list_foreach(si, &ctx->states) {
+            /* iterate all states */
+            struct state *s = list_entry(si, struct state, hook);
+            union param *op = &s->param_list->ops[s->op_begin];
+            fprintf(fp, "State: " MIDFMT "\n", s->id);
+            while (1) {
+                const struct opdef *def = opdefs + op->type;
+                switch (op->type) {
+                case OP_NEXT_BUF:
+                    op = (union param*)op[1].p; break;
+                default: {
+                    /* print out each argument from string format */
+                    union param *param = op;
+                    const char *str = def->str;
+                    while (*str) {
+                        if (*str != '%') {
+                            fputc(*str, fp);
+                            str++; continue;
+                        } str++;
+
+                        param++;
+                        assert(param - op <= def->argc);
+                        switch (*str++) {default: break;
+                        case 'f': fprintf(fp, "%g", param[0].f); break;
+                        case 'd': fprintf(fp, "%d", param[0].i); break;
+                        case 'u': fprintf(fp, "%u", param[0].u); break;
+                        case 'p': fprintf(fp, "%p", param[0].p); break;}
+                    } fputc('\n', fp);
+                    if (op[0].op == OP_BUF_END && op[1].mid == s->id)
+                        goto eot;
+                }} op += def->argc + 1;
+            } eot:break;
+        } jmpto(ctx, STATE_DONE);
+    }
     case STATE_SERIALIZE: {
         union process *p = &ctx->proc;
         operation_begin(p, PROC_FILL_SERIAL_CONFIG, ctx, &ctx->arena);
@@ -2191,49 +2242,10 @@ process_begin(struct context *ctx, unsigned flags)
         if (!p->serial.file)
             jmpto(ctx, STATE_SERIALIZE);
         switch (p->serial.type) {
-        case SERIALIZE_TRACE:
-            jmpto(ctx, STATE_SERIALIZE_TRACE);
         case SERIALIZE_BINARY:
             jmpto(ctx, STATE_SERIALIZE_BINARY);
         case SERIALIZE_TABLES:
             jmpto(ctx, STATE_SERIALIZE_TABLE);}
-    }
-    case STATE_SERIALIZE_TRACE: {
-        struct list_hook *si = 0;
-        union process *p = &ctx->proc;
-        FILE *fp = p->serial.file;
-        assert(fp);
-
-        list_foreach(si, &ctx->states) {
-            /* iterate all module */
-            struct state *s = list_entry(si, struct state, hook);
-            union param *op = &s->param_list->ops[s->op_begin];
-            while (1) {
-                const struct opdef *def = opdefs + op->type;
-                switch (op->type) {
-                case OP_NEXT_BUF: op = (union param*)op[1].p; break;
-                default: {
-                    /* print out each argument from string format */
-                    const char *str = def->str;
-                    while (*str) {
-                        if (*str != '%') {
-                            fputc(*str, fp);
-                            str++; continue;
-                        } str++; ++op;
-                        switch (*str++) {default: break;
-                        case 'f': fprintf(fp, "%g", op[0].f); break;
-                        case 'd': fprintf(fp, "%d", op[0].i); break;
-                        case 'u': fprintf(fp, "%u", op[0].u); break;
-                        case 'p': fprintf(fp, "%p", op[0].p); break;}
-                    } fputc('\n', fp);
-                    if (op[0].op == OP_BUF_END && op[1].id == s->id)
-                        goto eot;
-                }} op += def->argc;
-            } eot:break;
-        }
-        if (flags & flag(PROCESS_CLEAR))
-            jmpto(ctx, STATE_CLEAR);
-        else jmpto(ctx, STATE_DONE);
     }
     case STATE_SERIALIZE_BINARY: {
         union process *p = &ctx->proc;
@@ -2252,7 +2264,7 @@ process_begin(struct context *ctx, unsigned flags)
                 default: {
                     for (i = 0; i < def->argc; ++i)
                         fwrite(&op[i], sizeof(op[i]), 1, fp);
-                    if (op[0].op == OP_BUF_END && op[1].id == s->id)
+                    if (op[0].op == OP_BUF_END && op[1].mid == s->id)
                         goto eob;
                 }} op += def->argc;
             } eob: break;
@@ -2795,7 +2807,19 @@ commit(struct context *ctx)
         process_end(p);
     }
 }
-
+api void
+trace(struct context *ctx, FILE *fp)
+{
+    union process *p = 0;
+    assert(ctx);
+    assert(fp);
+    if (!ctx || !fp) return;
+    while ((p = process_begin(ctx, PROCESS_TRACE))) {
+        struct process_trace *t = &p->trace;
+        t->file = fp;
+        process_end(p);
+    }
+}
 /* ---------------------------------------------------------------------------
  *                                  Input
  * --------------------------------------------------------------------------- */
