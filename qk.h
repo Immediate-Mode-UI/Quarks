@@ -406,6 +406,8 @@ enum process_type {
     PROC_COMMIT,
     PROC_FILL_SERIAL_CONFIG,
     PROC_SERIALIZE,
+    PROC_TRACE,
+    PROC_FILL_TRACE_CONFIG,
     PROC_ALLOC,
     PROC_ALLOC_FRAME,
     PROC_FREE,
@@ -426,10 +428,10 @@ enum processes {
     PROCESS_INPUT = PROCESS_LAYOUT|flag(PROC_INPUT),
     PROCESS_PAINT = PROCESS_LAYOUT|flag(PROC_PAINT),
     PROCESS_SERIALIZE = PROCESS_COMMIT|flag(PROC_SERIALIZE),
+    PROCESS_TRACE = flag(PROC_TRACE),
     PROCESS_CLEANUP = PROCESS_FULL_CLEAR|flag(PROC_CLEANUP)
 };
 enum serialization_type {
-    SERIALIZE_TRACE,
     SERIALIZE_BINARY,
     SERIALIZE_TABLES,
     SERIALIZE_COUNT
@@ -461,6 +463,10 @@ struct process_paint {
     struct box **boxes;
     int cnt;
 };
+struct process_trace {
+    struct process_header hdr;
+    FILE *file;
+};
 struct process_serialize {
     struct process_header hdr;
     enum serialization_type type;
@@ -475,6 +481,7 @@ union process {
     struct process_layouting layout;
     struct process_input input;
     struct process_paint paint;
+    struct process_trace trace;
     struct process_serialize serial;
 };
 
@@ -553,6 +560,7 @@ api void clear(struct context *ctx);
 api void cleanup(struct context *ctx);
 api void generate(FILE *fp, struct context *ctx, const char *name);
 api void commit(struct context *ctx);
+api void trace(struct context *ctx, FILE *fp);
 api struct box *query(struct context *ctx, unsigned mid, uiid id);
 
 /* input */
