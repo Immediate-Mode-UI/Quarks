@@ -277,7 +277,6 @@ struct state {
     int op_begin, op_idx;
     struct param_buffer *param_list;
     struct param_buffer *opbuf;
-    const struct component *tbl;
 
     /* strings */
     int buf_off, total_buf_size;
@@ -558,10 +557,12 @@ api void reset(struct context *ctx);
 api void destroy(struct context *ctx);
 api void clear(struct context *ctx);
 api void cleanup(struct context *ctx);
-api void generate(FILE *fp, struct context *ctx, const char *name);
 api void commit(struct context *ctx);
-api void trace(struct context *ctx, FILE *fp);
 api struct box *query(struct context *ctx, unsigned mid, uiid id);
+
+api void store_table(FILE *fp, struct context *ctx, const char *name, int indent);
+api void store_binary(FILE *fp, struct context *ctx);
+api void trace(struct context *ctx, FILE *fp);
 
 /* input */
 api void input_char(struct context *ctx, char c);

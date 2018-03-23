@@ -660,7 +660,7 @@ ui_build_serialized_tables(FILE *fp)
     }}
     /*trace(ctx, stdout);*/
     commit(ctx);
-    generate(fp, ctx, "ui");
+    store_table(fp, ctx, "ui", 4);
     cleanup(ctx);
 }
 static void

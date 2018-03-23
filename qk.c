@@ -74,6 +74,18 @@ enum opcodes {
     #undef OP
     OPCNT
 };
+static const struct opdef {
+    enum opcodes type;
+    int argc;
+    const char *name;
+    const char *fmt;
+    const char *str;
+} opdefs[] = {
+    #define OP(a,b,c) {OP_ ## a, b, #a, c, #a " " c},
+    OPCODES(OP)
+    #undef OP
+    {OPCNT,0,0}
+};
 /* ---------------------------------------------------------------------------
  *                                  Math
  * --------------------------------------------------------------------------- */
@@ -581,10 +593,10 @@ box_intersect(const struct box *a, const struct box *b)
  *                                  Buffer
  * --------------------------------------------------------------------------- */
 intern union param*
-op_add(struct state *s, const union param *p, int cnt)
+op_push(struct state *s, int cnt)
 {
-    int i = 0;
-    assert(s && p);
+    union param *op;
+    assert(s);
     assert(cnt > 0);
     assert(cnt < MAX_OPS-2);
 
@@ -598,11 +610,9 @@ op_add(struct state *s, const union param *p, int cnt)
         s->opbuf = ob = b;
         s->op_idx = 0;
     } assert(s->op_idx + cnt < (MAX_OPS-2));
-
-    /* copy params into buffer */
-    for (i = 0; i < cnt; ++i)
-        ob->ops[s->op_idx++] = p[i];
-    return ob->ops + (s->op_idx - cnt);}
+    op = ob->ops + s->op_idx;
+    s->op_idx += cnt;}
+    return op;
 }
 intern const char*
 store(struct state *s, const char *str, int len)
@@ -766,7 +776,7 @@ module_begin(struct context *ctx, mid id,
     pushid(s, id);
 
     /* serialize api call */
-    {union param p[8];
+    {union param *p = op_push(s, 8);
     p[0].op = OP_BUF_BEGIN;
     p[1].mid = id;
     p[2].op = OP_BUF_ULINK;
@@ -774,8 +784,7 @@ module_begin(struct context *ctx, mid id,
     p[4].id = bid;
     p[5].op = OP_BUF_CONECT;
     p[6].mid = owner;
-    p[7].i = rel;
-    op_add(s, p, cntof(p));}
+    p[7].i = rel;}
     return s;
 }
 api void
@@ -783,10 +792,10 @@ module_end(struct state *s)
 {
     assert(s);
     if (!s) return;
-    {union param p[2];
+
+    {union param *p = op_push(s,2);
     p[0].op = OP_BUF_END;
-    p[1].id = s->id;
-    op_add(s, p, cntof(p));}
+    p[1].id = s->id;}
     popid(s);
 
     assert(!s->wtop);
@@ -850,13 +859,12 @@ link(struct state *s, mid id, enum relationship rel)
 {
     assert(s);
     if (!s) return;
-    {union param p[5];
+    {union param *p = op_push(s, 5);
     p[0].op = OP_BUF_DLINK;
     p[1].mid = id;
     p[2].op = OP_BUF_CONECT;
     p[3].mid = id;
-    p[4].i = rel;
-    op_add(s, p, cntof(p));}
+    p[4].i = rel;}
 }
 api struct state*
 begin(struct context *ctx, mid id)
@@ -876,18 +884,17 @@ end(struct state *s)
 api void
 slot(struct state *s, uiid id)
 {
-    union param p[4];
     assert(s);
     assert(s->wtop > 0);
     if (!s || s->wtop <= 0) return;
-
     widget_begin(s, WIDGET_SLOT);
+
+    {union param *p = op_push(s, 4);
     p[0].op = OP_BOX_PUSH;
     p[1].id = id;
     p[2].id = s->wstk[s->wtop-1].id;
     p[3].op = OP_BOX_POP;
-    op_add(s, p, cntof(p));
-    widget_end(s);
+    widget_end(s);}
 }
 /* ---------------------------------------------------------------------------
  *                                  Popup
@@ -906,10 +913,9 @@ popup_begin(struct state *s, mid id, enum popup_type type)
 api void
 popup_end(struct state *s)
 {
-    union param p[2];
+    union param *p = op_push(s, 2);
     p[0].op = OP_BUF_END;
     p[1].id = s->id;
-    op_add(s, p, cntof(p));
 }
 api struct box*
 popup_find(struct context *ctx, mid id)
@@ -956,54 +962,64 @@ popup_show(struct context *ctx, mid id, enum visibility vis)
 /* ---------------------------------------------------------------------------
  *                                  Widget
  * --------------------------------------------------------------------------- */
-api void
-widget_begin(struct state *s, int type)
+intern void
+wstk_push(struct state *s, int type, int *argc)
 {
     struct widget *w = 0;
-    union param p[3], *q = 0;
-    assert(s);
-    if (!s) return;
-
-    p[0].op = OP_WIDGET_BEGIN;
-    p[1].type = type;
-    p[2].i = 0;
-    q = op_add(s, p, cntof(p));
-    assert(q);
-
     assert(s->wtop < cntof(s->wstk));
     w = s->wstk + s->wtop++;
     w->id = genwid(s);
-    w->argc = &q[2].i;
+    w->argc = argc;
     w->type = type;
+}
+intern struct widget*
+wstk_peek(struct state *s)
+{
+    int i = max(0, s->wtop - 1);
+    assert(s->wtop > 0);
+    return &s->wstk[i];
+}
+intern void
+wstk_pop(struct state *s)
+{
+    assert(s->wtop > 0);
+    s->wtop = max(s->wtop-1, 0);
+}
+api void
+widget_begin(struct state *s, int type)
+{
+    assert(s);
+    if (!s) return;
+    {union param *p = op_push(s,3);
+    p[0].op = OP_WIDGET_BEGIN;
+    p[1].type = type;
+    p[2].i = 0;
+    wstk_push(s, type, &p[2].i);}
 }
 api void
 widget_end(struct state *s)
 {
-    union param p[1];
     assert(s);
-    assert(s->wtop > 0);
     if (!s || s->wtop <= 0) return;
-
+    {union param *p = op_push(s,1);
     p[0].op = OP_WIDGET_END;
-    op_add(s, p, cntof(p));
-    s->wtop = max(s->wtop-1, 0);
+    wstk_pop(s);}
 }
 api uiid
 widget_box_push(struct state *s)
 {
-    union param p[3];
     assert(s);
     if (!s) return 0;
 
+    {union param *p = op_push(s,3);
     p[0].op = OP_BOX_PUSH;
     p[1].id = genbid(s);
     p[2].id = s->wstk[s->wtop-1].id;
-    op_add(s, p, cntof(p));
 
     s->depth++;
     s->boxcnt++;
     s->tree_depth = max(s->depth, s->tree_depth);
-    return p[1].id;
+    return p[1].id;}
 }
 api uiid
 widget_box(struct state *s)
@@ -1015,108 +1031,98 @@ widget_box(struct state *s)
 api void
 widget_box_pop(struct state *s)
 {
-    union param p[1];
     assert(s);
     if (!s) return;
 
+    {union param *p = op_push(s,1);
     p[0].op = OP_BOX_POP;
-    op_add(s, p, cntof(p));
     assert(s->depth);
-    s->depth = max(s->depth-1, 0);
+    s->depth = max(s->depth-1, 0);}
 }
 api void
 widget_box_property_set(struct state *s, enum properties prop)
 {
-    union param p[2];
+    union param *p = op_push(s,2);
     p[0].op = OP_PROPERTY_SET;
     p[1].u = prop;
-    op_add(s, p, cntof(p));
 }
 api void
 widget_box_property_clear(struct state *s, enum properties prop)
 {
-    union param p[2];
+    union param *p = op_push(s,2);
     p[0].op = OP_PROPERTY_CLR;
     p[1].u = prop;
-    op_add(s, p, cntof(p));
 }
 /* ---------------------------------------------------------------------------
  *                                  Parameter
  * --------------------------------------------------------------------------- */
 intern union param*
-widget_push_param(struct state *s, union param *p)
+widget_push_param(struct state *s)
 {
-    struct widget *w = 0;
-    assert(s->wtop > 0);
-    w = &s->wstk[s->wtop-1];
-    *w->argc +=1 ; s->argcnt++;
-    return op_add(s, p, 2);
+    struct widget *w = wstk_peek(s);
+    *w->argc +=1;
+    s->argcnt++;
+    return op_push(s, 2);
 }
 api float*
 widget_param_float(struct state *s, float f)
 {
     assert(s);
     if (!s) return 0;
-    {union param p[2], *q;
+    {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_FLOAT;
     p[1].f = f;
-    q = widget_push_param(s, p);
-    return &q[1].f;}
+    return &p[1].f;}
 }
 api int*
 widget_param_int(struct state *s, int i)
 {
     assert(s);
     if (!s) return 0;
-    {union param p[2], *q;
+    {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_INT;
     p[1].i = i;
-    q = widget_push_param(s, p);
-    return &q[1].i;}
+    return &p[1].i;}
 }
 api unsigned*
 widget_param_uint(struct state *s, unsigned u)
 {
     assert(s);
     if (!s) return 0;
-    {union param p[2], *q;
+    {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_UINT;
     p[1].u = u;
-    q = widget_push_param(s, p);
-    return &q[1].u;}
+    return &p[1].u;}
 }
 api uiid*
 widget_param_id(struct state *s, uiid id)
 {
     assert(s);
     if (!s) return 0;
-    {union param p[2], *q;
+    {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_ID;
     p[1].id = id;
-    q = widget_push_param(s, p);
-    return &q[1].id;}
+    return &p[1].id;}
 }
 api mid*
 widget_param_mid(struct state *s, mid id)
 {
     assert(s);
     if (!s) return 0;
-    {union param p[2], *q;
+    {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_MID;
     p[1].mid = id;
-    q = widget_push_param(s, p);
-    return &q[1].mid;}
+    return &p[1].mid;}
 }
 api const char*
 widget_param_str(struct state *s, const char *str, int len)
 {
     assert(s);
     if (!s) return 0;
-    {union param p[2];
+    {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_STR;
     p[1].i = len + 1;
-    widget_push_param(s, p);}
-    return store(s, str, len);
+    return store(s, str, len);}
 }
 api float*
 widget_modifier_float(struct state *s, float *f)
@@ -1496,31 +1502,14 @@ process_begin(struct context *ctx, unsigned flags)
         STATE_ALLOC_TEMPORARY, STATE_COMPILE,
         STATE_BLUEPRINT, STATE_LAYOUTING, STATE_TRANSFORM,
         STATE_INPUT, STATE_PAINT,
-        STATE_TRACE_DISPATCH, STATE_TRACE,
-        STATE_SERIALIZE, STATE_SERIALIZE_DISPATCH,
-        STATE_SERIALIZE_TABLE, STATE_SERIALIZE_BINARY,
         STATE_CLEAR, STATE_GC, STATE_CLEANUP, STATE_DONE
-    };
-    static const struct opdef {
-        enum opcodes type;
-        int argc;
-        const char *name;
-        const char *fmt;
-        const char *str;
-    } opdefs[] = {
-        #define OP(a,b,c) {OP_ ## a, b, #a, c, #a " " c},
-        OPCODES(OP)
-        #undef OP
-        {OPCNT,0,0}
     };
     int i = 0;
     assert(ctx);
     if (!ctx) return 0;
     r:switch (ctx->state) {
     case STATE_DISPATCH: {
-        if (flags & flag(PROC_TRACE))
-            jmpto(ctx, STATE_TRACE_DISPATCH);
-        else if (flags & flag(PROC_CLEANUP))
+        if (flags & flag(PROC_CLEANUP))
             jmpto(ctx, STATE_CLEANUP);
         else if (flags & flag(PROC_CLEAR))
             jmpto(ctx, STATE_GC);
@@ -1565,8 +1554,6 @@ process_begin(struct context *ctx, unsigned flags)
                 jmpto(ctx, STATE_INPUT);
             else if (flags & flag(PROC_PAINT))
                 jmpto(ctx, STATE_PAINT);
-            else if (flags & flag(PROC_SERIALIZE))
-                jmpto(ctx, STATE_SERIALIZE);
             else jmpto(ctx, STATE_DONE);
         }
         s = list_entry(ctx->iter, struct state, hook);
@@ -1888,8 +1875,6 @@ process_begin(struct context *ctx, unsigned flags)
                 jmpto(ctx, STATE_INPUT);
             else if (flags & flag(PROC_PAINT))
                 jmpto(ctx, STATE_PAINT);
-            else if (flags & flag(PROC_SERIALIZE))
-                jmpto(ctx, STATE_SERIALIZE);
             else jmpto(ctx, STATE_DONE);
         } m = list_entry(ctx->iter, struct module, hook);
         assert(m);
@@ -2148,9 +2133,7 @@ process_begin(struct context *ctx, unsigned flags)
                 operation_end(p);
                 jmpto(ctx, STATE_PAINT);
             } ctx->state = STATE_PAINT;
-        } else if (flags & flag(PROC_SERIALIZE))
-            ctx->state = STATE_SERIALIZE;
-        else if (flags & flag(PROC_CLEAR))
+        } else if (flags & flag(PROC_CLEAR))
             ctx->state = STATE_CLEAR;
         else ctx->state = STATE_DONE;
         return p;
@@ -2182,196 +2165,10 @@ process_begin(struct context *ctx, unsigned flags)
         temp_memory_end(tmp);
 
         /* state transition table */
-        if (flags & flag(PROC_SERIALIZE))
-            ctx->state = STATE_SERIALIZE;
-        else if (flags & flag(PROC_CLEAR))
+        if (flags & flag(PROC_CLEAR))
             ctx->state = STATE_CLEAR;
         else ctx->state = STATE_DONE;
         return p;
-    }
-    case STATE_TRACE_DISPATCH: {
-        union process *p = &ctx->proc;
-        operation_begin(p, PROC_FILL_TRACE_CONFIG, ctx, &ctx->arena);
-        ctx->state = STATE_TRACE;
-        return p;
-    }
-    case STATE_TRACE: {
-        struct list_hook *si = 0;
-        union process *p = &ctx->proc;
-        FILE *fp = p->trace.file;
-        if (!fp) return p;
-
-        list_foreach(si, &ctx->states) {
-            /* iterate all states */
-            struct state *s = list_entry(si, struct state, hook);
-            union param *op = &s->param_list->ops[s->op_begin];
-            fprintf(fp, "State: " MIDFMT "\n", s->id);
-            while (1) {
-                const struct opdef *def = opdefs + op->type;
-                switch (op->type) {
-                case OP_NEXT_BUF:
-                    op = (union param*)op[1].p; break;
-                default: {
-                    /* print out each argument from string format */
-                    union param *param = op;
-                    const char *str = def->str;
-                    while (*str) {
-                        if (*str != '%') {
-                            fputc(*str, fp);
-                            str++; continue;
-                        } str++;
-
-                        param++;
-                        assert(param - op <= def->argc);
-                        switch (*str++) {default: break;
-                        case 'f': fprintf(fp, "%g", param[0].f); break;
-                        case 'd': fprintf(fp, "%d", param[0].i); break;
-                        case 'u': fprintf(fp, "%u", param[0].u); break;
-                        case 'p': fprintf(fp, "%p", param[0].p); break;}
-                    } fputc('\n', fp);
-                    if (op[0].op == OP_BUF_END && op[1].mid == s->id)
-                        goto eot;
-                }} op += def->argc + 1;
-            } eot:break;
-        } jmpto(ctx, STATE_DONE);
-    }
-    case STATE_SERIALIZE: {
-        union process *p = &ctx->proc;
-        operation_begin(p, PROC_FILL_SERIAL_CONFIG, ctx, &ctx->arena);
-        ctx->state = STATE_SERIALIZE_DISPATCH;
-        return p;
-    }
-    case STATE_SERIALIZE_DISPATCH: {
-        union process *p = &ctx->proc;
-        if (!p->serial.file)
-            jmpto(ctx, STATE_SERIALIZE);
-        switch (p->serial.type) {
-        case SERIALIZE_BINARY:
-            jmpto(ctx, STATE_SERIALIZE_BINARY);
-        case SERIALIZE_TABLES:
-            jmpto(ctx, STATE_SERIALIZE_TABLE);}
-    }
-    case STATE_SERIALIZE_BINARY: {
-        union process *p = &ctx->proc;
-        FILE *fp = p->serial.file;
-        struct list_hook *si = 0;
-        assert(fp);
-
-        list_foreach(si, &ctx->states) {
-            struct state *s = list_entry(si, struct state, hook);
-            union param *op = &s->param_list->ops[s->op_begin];
-            while (1) {
-                const struct opdef *def = opdefs + op->type;
-                switch (op->type) {
-                case OP_NEXT_BUF:
-                    op = (union param*)op[1].p; break;
-                default: {
-                    for (i = 0; i < def->argc; ++i)
-                        fwrite(&op[i], sizeof(op[i]), 1, fp);
-                    if (op[0].op == OP_BUF_END && op[1].mid == s->id)
-                        goto eob;
-                }} op += def->argc;
-            } eob: break;
-        }
-        if (flags & flag(PROCESS_CLEAR))
-            jmpto(ctx, STATE_CLEAR);
-        else jmpto(ctx, STATE_DONE);
-    }
-    case STATE_SERIALIZE_TABLE: {
-        /* generate box flags */
-        static const struct property_def {
-            const char *name; int len;
-        } property_info[] = {
-            #define PROP(p) {"BOX_" #p, (cntof("BOX_" #p)-1)},
-                PROPERTY_MAP(PROP)
-            #undef PROP
-        }; const union process *p = &ctx->proc;
-        const struct process_serialize *ps = &p->serial;
-        FILE *fp = ps->file;
-
-        /* I.) Dump each repository into C compile time tables */
-        struct list_hook *it = 0;
-        list_foreach(it, &ctx->mod) {
-            struct module *m = list_entry(it, struct module, hook);
-            const struct repository *r = m->repo[m->repoid];
-            if (!m->id) continue; /* skip root */
-
-            assert(fp);
-            fprintf(fp, "static const struct element g_%u_elements[] = {\n", m->id);
-            for (i = 0; i < r->boxcnt; ++i) {
-                const struct box *b = r->boxes + i;
-                const struct box *pb = b->parent;
-                uiid pid = (pb && i) ? pb->id: 0;
-                char buf[256]; int j, n = 0; buf[n++] = '0';
-                for (j = 0; j < PROPERTY_INDEX_MAX; ++j) {
-                    if (b->flags & flag(j)) {
-                        const struct property_def *pi = 0;
-                        pi = property_info + j;
-                        buf[n++] = '|';
-                        copy(buf+n, pi->name, pi->len);
-                        n += pi->len;
-                    } buf[n] = 0;
-                } fprintf(fp, "    {%d, " IDFMT "lu, " IDFMT "lu, " IDFMT "lu, %d, %d, %s, %u, %u},\n",
-                    b->type, b->id, pid, b->wid, b->depth, b->tree_depth, buf,
-                    (unsigned)(b->params - r->params), (unsigned)(b->buf - r->buf));
-            } fprintf(fp, "};\n");
-            fprintf(fp, "static const uiid g_%u_tbl_keys[%d] = {\n%*s", m->id, r->tbl.cnt, ps->indent, "");
-            for (i = 0; i < r->tbl.cnt; ++i) {
-                if (i && !(i & 0x07)) fprintf(fp, "\n%*s", ps->indent, "");
-                fprintf(fp, IDFMT"lu", r->tbl.keys[i]);
-                if (i < r->tbl.cnt-1) fputc(',', fp);
-            } fprintf(fp, "\n};\n");
-            fprintf(fp, "static const int g_%u_tbl_vals[%d] = {\n%*s",m->id, r->tbl.cnt, ps->indent, "");
-            for (i = 0; i < r->tbl.cnt; ++i) {
-                if (i && !(i & 0x0F)) fprintf(fp, "\n%*s", ps->indent, "");
-                fprintf(fp, "%d", r->tbl.vals[i]);
-                if (i + 1 < r->tbl.cnt) fputc(',', fp);
-            } fprintf(fp, "\n};\n");
-            fprintf(fp, "static union param g_%u_params[%d] = {\n%*s", m->id, r->argcnt, ps->indent, "");
-            for (i = 0; i < r->argcnt; ++i) {
-                if (i && !(i & 0x7)) fprintf(fp, "\n%*s", ps->indent, "");
-                fprintf(fp, "{"IDFMT"lu}", r->params[i].id);
-                if (i + 1 < r->argcnt) fputc(',', fp);
-            } fprintf(fp, "\n};\n");
-            fprintf(fp, "static const unsigned char g_%u_data[%d] = {\n%*s", m->id, r->bufsiz, ps->indent, "");
-            for (i = 0; i < r->bufsiz; ++i) {
-                unsigned char c = cast(unsigned char,r->buf[i]);
-                if (i && !(i & 0x0F)) fprintf(fp, "\n%*s", ps->indent, "");
-                fprintf(fp, "0x%02x", c);
-                if (i + 1 < r->bufsiz) fputc(',', fp);
-            } fprintf(fp, "\n};\n");
-            fprintf(fp, "static struct box *g_%u_bfs[%d];\n", m->id, r->boxcnt+1);
-            fprintf(fp, "static struct box g_%u_boxes[%d];\n", m->id, r->boxcnt);
-            fprintf(fp, "static struct module g_%u_module;\n", m->id);
-            fprintf(fp, "static struct repository g_%u_repo;\n", m->id);
-            fprintf(fp, "static const struct component g_%u_component = {\n", m->id);
-            fprintf(fp, "%*s%d," MIDFMT ", %d, %d,", ps->indent, "", VERSION, m->id, r->depth, r->tree_depth);
-            fprintf(fp, "g_%u_elements, cntof(g_%u_elements),\n", m->id, m->id);
-            fprintf(fp, "%*sg_%u_tbl_vals, g_%u_tbl_keys,", ps->indent, "", m->id, m->id);
-            fprintf(fp, "cntof(g_%u_tbl_keys),\n", m->id);
-            fprintf(fp, "%*sg_%u_data, cntof(g_%u_data),\n", ps->indent, "", m->id, m->id);
-            fprintf(fp, "%*sg_%u_params, cntof(g_%u_params),\n", ps->indent, "", m->id, m->id);
-            fprintf(fp, "%*s&g_%u_module, &g_%u_repo, ", ps->indent, "", m->id, m->id);
-            fprintf(fp, "g_%u_boxes,\n%*sg_%u_bfs, ", m->id, ps->indent, "", m->id);
-            fprintf(fp, "cntof(g_%u_boxes)\n", m->id);
-            fprintf(fp, "};\n");
-        }
-        /* II.) Dump each module into C compile time tables */
-        fprintf(fp, "static const struct container g_%s_containers[] = {\n", p->serial.name);
-        list_foreach(it, &ctx->mod) {
-            struct module *m = list_entry(it, struct module, hook);
-            if (!m->id || !m->parent || !m->owner) continue; /* skip root */
-            assert(m->parent);
-            assert(m->owner);
-            fprintf(fp, "%*s{%u, %u, "IDFMT", %u, %d, &g_%u_component},\n",
-                ps->indent, "", m->id, m->parent->id, m->root->parent->id,
-                m->owner->id, m->rel, m->id);
-        } fprintf(fp, "};\n");
-
-        /* state transition table */
-        if (flags & flag(PROCESS_CLEAR))
-            jmpto(ctx, STATE_CLEAR);
-        else jmpto(ctx, STATE_DONE);
     }
     case STATE_GC: {
         struct module *m = 0;
@@ -2782,22 +2579,120 @@ cleanup(struct context *ctx)
     } destroy(ctx);
 }
 api void
-generate(FILE *fp, struct context *ctx, const char *name)
+store_table(FILE *fp, struct context *ctx, const char *name, int indent)
 {
-    union process *p = 0;
-    assert(ctx);
-    assert(fp);
-    assert(name);
-    if (!ctx || !fp || !name)
-        return;
+    /* generate box flags */
+    int i = 0;
+    static const struct property_def {
+        const char *name; int len;
+    } property_info[] = {
+        #define PROP(p) {"BOX_" #p, (cntof("BOX_" #p)-1)},
+            PROPERTY_MAP(PROP)
+        #undef PROP
+    }; const union process *p = &ctx->proc;
 
-    while ((p = process_begin(ctx, PROCESS_SERIALIZE))) {
-        struct process_serialize *serial = &p->serial;
-        serial->type = SERIALIZE_TABLES;
-        serial->file = fp;
-        serial->name = name;
-        serial->indent = 4;
-        process_end(p);
+    /* I.) Dump each repository into C compile time tables */
+    struct list_hook *it = 0;
+    list_foreach(it, &ctx->mod) {
+        struct module *m = list_entry(it, struct module, hook);
+        const struct repository *r = m->repo[m->repoid];
+        if (!m->id) continue; /* skip root */
+
+        assert(fp);
+        fprintf(fp, "static const struct element g_%u_elements[] = {\n", m->id);
+        for (i = 0; i < r->boxcnt; ++i) {
+            const struct box *b = r->boxes + i;
+            const struct box *pb = b->parent;
+            uiid pid = (pb && i) ? pb->id: 0;
+            char buf[256]; int j, n = 0; buf[n++] = '0';
+            for (j = 0; j < PROPERTY_INDEX_MAX; ++j) {
+                if (b->flags & flag(j)) {
+                    const struct property_def *pi = 0;
+                    pi = property_info + j;
+                    buf[n++] = '|';
+                    copy(buf+n, pi->name, pi->len);
+                    n += pi->len;
+                } buf[n] = 0;
+            } fprintf(fp, "    {%d, " IDFMT "lu, " IDFMT "lu, " IDFMT "lu, %d, %d, %s, %u, %u},\n",
+                b->type, b->id, pid, b->wid, b->depth, b->tree_depth, buf,
+                (unsigned)(b->params - r->params), (unsigned)(b->buf - r->buf));
+        } fprintf(fp, "};\n");
+        fprintf(fp, "static const uiid g_%u_tbl_keys[%d] = {\n%*s", m->id, r->tbl.cnt, indent, "");
+        for (i = 0; i < r->tbl.cnt; ++i) {
+            if (i && !(i & 0x07)) fprintf(fp, "\n%*s", indent, "");
+            fprintf(fp, IDFMT"lu", r->tbl.keys[i]);
+            if (i < r->tbl.cnt-1) fputc(',', fp);
+        } fprintf(fp, "\n};\n");
+        fprintf(fp, "static const int g_%u_tbl_vals[%d] = {\n%*s",m->id, r->tbl.cnt, indent, "");
+        for (i = 0; i < r->tbl.cnt; ++i) {
+            if (i && !(i & 0x0F)) fprintf(fp, "\n%*s", indent, "");
+            fprintf(fp, "%d", r->tbl.vals[i]);
+            if (i + 1 < r->tbl.cnt) fputc(',', fp);
+        } fprintf(fp, "\n};\n");
+        fprintf(fp, "static union param g_%u_params[%d] = {\n%*s", m->id, r->argcnt, indent, "");
+        for (i = 0; i < r->argcnt; ++i) {
+            if (i && !(i & 0x7)) fprintf(fp, "\n%*s", indent, "");
+            fprintf(fp, "{"IDFMT"lu}", r->params[i].id);
+            if (i + 1 < r->argcnt) fputc(',', fp);
+        } fprintf(fp, "\n};\n");
+        fprintf(fp, "static const unsigned char g_%u_data[%d] = {\n%*s", m->id, r->bufsiz, indent, "");
+        for (i = 0; i < r->bufsiz; ++i) {
+            unsigned char c = cast(unsigned char,r->buf[i]);
+            if (i && !(i & 0x0F)) fprintf(fp, "\n%*s", indent, "");
+            fprintf(fp, "0x%02x", c);
+            if (i + 1 < r->bufsiz) fputc(',', fp);
+        } fprintf(fp, "\n};\n");
+        fprintf(fp, "static struct box *g_%u_bfs[%d];\n", m->id, r->boxcnt+1);
+        fprintf(fp, "static struct box g_%u_boxes[%d];\n", m->id, r->boxcnt);
+        fprintf(fp, "static struct module g_%u_module;\n", m->id);
+        fprintf(fp, "static struct repository g_%u_repo;\n", m->id);
+        fprintf(fp, "static const struct component g_%u_component = {\n", m->id);
+        fprintf(fp, "%*s%d," MIDFMT ", %d, %d,", indent, "", VERSION, m->id, r->depth, r->tree_depth);
+        fprintf(fp, "g_%u_elements, cntof(g_%u_elements),\n", m->id, m->id);
+        fprintf(fp, "%*sg_%u_tbl_vals, g_%u_tbl_keys,", indent, "", m->id, m->id);
+        fprintf(fp, "cntof(g_%u_tbl_keys),\n", m->id);
+        fprintf(fp, "%*sg_%u_data, cntof(g_%u_data),\n", indent, "", m->id, m->id);
+        fprintf(fp, "%*sg_%u_params, cntof(g_%u_params),\n", indent, "", m->id, m->id);
+        fprintf(fp, "%*s&g_%u_module, &g_%u_repo, ", indent, "", m->id, m->id);
+        fprintf(fp, "g_%u_boxes,\n%*sg_%u_bfs, ", m->id, indent, "", m->id);
+        fprintf(fp, "cntof(g_%u_boxes)\n", m->id);
+        fprintf(fp, "};\n");
+    }
+    /* II.) Dump each module into C compile time tables */
+    fprintf(fp, "static const struct container g_%s_containers[] = {\n", p->serial.name);
+    list_foreach(it, &ctx->mod) {
+        struct module *m = list_entry(it, struct module, hook);
+        if (!m->id || !m->parent || !m->owner) continue; /* skip root */
+        assert(m->parent);
+        assert(m->owner);
+        fprintf(fp, "%*s{%u, %u, "IDFMT", %u, %d, &g_%u_component},\n",
+            indent, "", m->id, m->parent->id, m->root->parent->id,
+            m->owner->id, m->rel, m->id);
+    } fprintf(fp, "};\n");
+}
+api void
+store_binary(FILE *fp, struct context *ctx)
+{
+    int i = 0;
+    struct list_hook *si = 0;
+    assert(fp);
+    assert(ctx);
+
+    list_foreach(si, &ctx->states) {
+        struct state *s = list_entry(si, struct state, hook);
+        union param *op = &s->param_list->ops[s->op_begin];
+        while (1) {
+            const struct opdef *def = opdefs + op->type;
+            switch (op->type) {
+            case OP_NEXT_BUF:
+                op = (union param*)op[1].p; break;
+            default: {
+                for (i = 0; i < def->argc; ++i)
+                    fwrite(&op[i], sizeof(op[i]), 1, fp);
+                if (op[0].op == OP_BUF_END && op[1].mid == s->id)
+                    goto eob;
+            }} op += def->argc;
+        } eob: break;
     }
 }
 api void
@@ -2814,14 +2709,41 @@ commit(struct context *ctx)
 api void
 trace(struct context *ctx, FILE *fp)
 {
-    union process *p = 0;
-    assert(ctx);
-    assert(fp);
-    if (!ctx || !fp) return;
-    while ((p = process_begin(ctx, PROCESS_TRACE))) {
-        struct process_trace *t = &p->trace;
-        t->file = fp;
-        process_end(p);
+    struct list_hook *si = 0;
+    if (!fp) return;
+
+    list_foreach(si, &ctx->states) {
+        /* iterate all states */
+        struct state *s = list_entry(si, struct state, hook);
+        union param *op = &s->param_list->ops[s->op_begin];
+        fprintf(fp, "State: " MIDFMT "\n", s->id);
+        while (1) {
+            const struct opdef *def = opdefs + op->type;
+            switch (op->type) {
+            case OP_NEXT_BUF:
+                op = (union param*)op[1].p; break;
+            default: {
+                /* print out each argument from string format */
+                union param *param = op;
+                const char *str = def->str;
+                while (*str) {
+                    if (*str != '%') {
+                        fputc(*str, fp);
+                        str++; continue;
+                    } str++;
+
+                    param++;
+                    assert(param - op <= def->argc);
+                    switch (*str++) {default: break;
+                    case 'f': fprintf(fp, "%g", param[0].f); break;
+                    case 'd': fprintf(fp, "%d", param[0].i); break;
+                    case 'u': fprintf(fp, "%u", param[0].u); break;
+                    case 'p': fprintf(fp, "%p", param[0].p); break;}
+                } fputc('\n', fp);
+                if (op[0].op == OP_BUF_END && op[1].mid == s->id)
+                    goto eot;
+            }} op += def->argc + 1;
+        } eot:break;
     }
 }
 /* ---------------------------------------------------------------------------
