@@ -427,11 +427,6 @@ enum processes {
     PROCESS_PAINT = PROCESS_LAYOUT|flag(PROC_PAINT),
     PROCESS_CLEANUP = PROCESS_FULL_CLEAR|flag(PROC_CLEANUP)
 };
-enum serialization_type {
-    SERIALIZE_BINARY,
-    SERIALIZE_TABLES,
-    SERIALIZE_COUNT
-};
 struct process_header {
     enum process_type type;
     struct context *ctx;
@@ -466,8 +461,6 @@ union process {
     struct process_layouting layout;
     struct process_input input;
     struct process_paint paint;
-    struct process_trace trace;
-    struct process_serialize serial;
 };
 
 /* context */
