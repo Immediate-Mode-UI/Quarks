@@ -593,15 +593,15 @@ box_intersect(const struct box *a, const struct box *b)
  *                                  Buffer
  * --------------------------------------------------------------------------- */
 intern union param*
-op_push(struct state *s, int cnt)
+op_push(struct state *s, int n)
 {
     union param *op;
     assert(s);
-    assert(cnt > 0);
-    assert(cnt < MAX_OPS-2);
+    assert(n > 0);
+    assert(n < MAX_OPS-2);
 
     {struct param_buffer *ob = s->opbuf;
-    if ((s->op_idx + cnt) >= (MAX_OPS-2)) {
+    if ((s->op_idx + n) >= (MAX_OPS-2)) {
         /* allocate new param buffer */
         struct param_buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
@@ -609,33 +609,33 @@ op_push(struct state *s, int cnt)
         ob->ops[s->op_idx + 1].p = b;
         s->opbuf = ob = b;
         s->op_idx = 0;
-    } assert(s->op_idx + cnt < (MAX_OPS-2));
+    } assert(s->op_idx + n < (MAX_OPS-2));
     op = ob->ops + s->op_idx;
-    s->op_idx += cnt;}
+    s->op_idx += n;}
     return op;
 }
 intern const char*
-store(struct state *s, const char *str, int len)
+store(struct state *s, const char *str, int n)
 {
     assert(s && str);
     assert(s->buf);
-    assert(len < MAX_STR_BUF-1);
+    assert(n < MAX_STR_BUF-1);
 
     {struct buffer *ob = s->buf;
-    if ((s->buf_off + len) > MAX_STR_BUF-1) {
+    if ((s->buf_off + n) > MAX_STR_BUF-1) {
         /* allocate new data buffer */
         struct buffer *b = arena_push(&s->arena, 1, szof(*ob), 0);
         s->buf_off = 0;
         ob->next = b;
         s->buf = ob = b;
-    } assert((s->buf_off + len) <= MAX_STR_BUF-1);
-    copy(ob->buf + s->buf_off, str, len);
+    } assert((s->buf_off + n) <= MAX_STR_BUF-1);
+    copy(ob->buf + s->buf_off, str, n);
 
     /* store zero-terminated string */
     {int off = s->buf_off;
-    ob->buf[s->buf_off + len] = 0;
-    s->total_buf_size += len + 1;
-    s->buf_off += len + 1;
+    ob->buf[s->buf_off + n] = 0;
+    s->total_buf_size += n + 1;
+    s->buf_off += n + 1;
     return ob->buf + off;}}
 }
 /* ---------------------------------------------------------------------------
