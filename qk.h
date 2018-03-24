@@ -400,22 +400,21 @@ union event {
 
 /* process */
 enum process_type {
+    /* clear */
     PROC_CLEAR,
     PROC_FULL_CLEAR,
-    PROC_COMMIT,
-    PROC_FILL_SERIAL_CONFIG,
-    PROC_SERIALIZE,
-    PROC_TRACE,
-    PROC_FILL_TRACE_CONFIG,
-    PROC_ALLOC,
+    PROC_CLEANUP,
+    /* memory */
+    PROC_ALLOC_PERSISTENT,
     PROC_ALLOC_FRAME,
-    PROC_FREE,
+    PROC_FREE_PERSISTENT,
     PROC_FREE_FRAME,
+    /* process */
+    PROC_COMMIT,
     PROC_BLUEPRINT,
     PROC_LAYOUT,
     PROC_INPUT,
     PROC_PAINT,
-    PROC_CLEANUP,
     PROC_CNT
 };
 enum processes {
@@ -426,8 +425,6 @@ enum processes {
     PROCESS_LAYOUT = PROCESS_BLUEPRINT|flag(PROC_LAYOUT),
     PROCESS_INPUT = PROCESS_LAYOUT|flag(PROC_INPUT),
     PROCESS_PAINT = PROCESS_LAYOUT|flag(PROC_PAINT),
-    PROCESS_SERIALIZE = PROCESS_COMMIT|flag(PROC_SERIALIZE),
-    PROCESS_TRACE = flag(PROC_TRACE),
     PROCESS_CLEANUP = PROCESS_FULL_CLEAR|flag(PROC_CLEANUP)
 };
 enum serialization_type {
@@ -461,17 +458,6 @@ struct process_paint {
     struct process_header hdr;
     struct box **boxes;
     int cnt;
-};
-struct process_trace {
-    struct process_header hdr;
-    FILE *file;
-};
-struct process_serialize {
-    struct process_header hdr;
-    enum serialization_type type;
-    const char *name;
-    int indent;
-    FILE *file;
 };
 union process {
     enum process_type type;
@@ -553,13 +539,14 @@ struct context {
 api struct context *create(const struct allocator *a, const struct config *cfg);
 api int init(struct context *ctx, const struct allocator *a, const struct config *cfg);
 api void load(struct context *ctx, const struct container *c, int cnt);
+api struct box *query(struct context *ctx, unsigned mid, uiid id);
 api void reset(struct context *ctx);
-api void destroy(struct context *ctx);
 api void clear(struct context *ctx);
 api void cleanup(struct context *ctx);
 api void commit(struct context *ctx);
-api struct box *query(struct context *ctx, unsigned mid, uiid id);
+api void destroy(struct context *ctx);
 
+/* serialize */
 api void store_table(FILE *fp, struct context *ctx, const char *name, int indent);
 api void store_binary(FILE *fp, struct context *ctx);
 api void trace(struct context *ctx, FILE *fp);
