@@ -593,15 +593,15 @@ box_intersect(const struct box *a, const struct box *b)
  *                                  Buffer
  * --------------------------------------------------------------------------- */
 intern union param*
-op_push(struct state *s, int n)
+op_push(struct state *s, int cnt)
 {
     union param *op;
     assert(s);
-    assert(n > 0);
-    assert(n < MAX_OPS-2);
+    assert(cnt > 0);
+    assert(cnt < MAX_OPS-2);
 
     {struct param_buffer *ob = s->opbuf;
-    if ((s->op_idx + n) >= (MAX_OPS-2)) {
+    if ((s->op_idx + cnt) >= (MAX_OPS-2)) {
         /* allocate new param buffer */
         struct param_buffer *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
@@ -609,33 +609,33 @@ op_push(struct state *s, int n)
         ob->ops[s->op_idx + 1].p = b;
         s->opbuf = ob = b;
         s->op_idx = 0;
-    } assert(s->op_idx + n < (MAX_OPS-2));
+    } assert(s->op_idx + cnt < (MAX_OPS-2));
     op = ob->ops + s->op_idx;
-    s->op_idx += n;}
+    s->op_idx += cnt;}
     return op;
 }
 intern const char*
-store(struct state *s, const char *str, int n)
+store(struct state *s, const char *str, int len)
 {
     assert(s && str);
     assert(s->buf);
-    assert(n < MAX_STR_BUF-1);
+    assert(len < MAX_STR_BUF-1);
 
     {struct buffer *ob = s->buf;
-    if ((s->buf_off + n) > MAX_STR_BUF-1) {
+    if ((s->buf_off + len) > MAX_STR_BUF-1) {
         /* allocate new data buffer */
         struct buffer *b = arena_push(&s->arena, 1, szof(*ob), 0);
         s->buf_off = 0;
         ob->next = b;
         s->buf = ob = b;
-    } assert((s->buf_off + n) <= MAX_STR_BUF-1);
-    copy(ob->buf + s->buf_off, str, n);
+    } assert((s->buf_off + len) <= MAX_STR_BUF-1);
+    copy(ob->buf + s->buf_off, str, len);
 
     /* store zero-terminated string */
     {int off = s->buf_off;
-    ob->buf[s->buf_off + n] = 0;
-    s->total_buf_size += n + 1;
-    s->buf_off += n + 1;
+    ob->buf[s->buf_off + len] = 0;
+    s->total_buf_size += len + 1;
+    s->buf_off += len + 1;
     return ob->buf + off;}}
 }
 /* ---------------------------------------------------------------------------
@@ -1474,232 +1474,6 @@ itr(struct list_hook *list, struct list_hook *iter)
     else iter = iter->prev;
     return iter;
 }
-api struct repository*
-compile(const struct state *s)
-{
-    union process *p = &ctx->proc;
-    struct state *s = list_entry(ctx->iter, struct state, hook);
-    struct module *m = s->mod;
-
-    struct repository *old = m->repo[m->repoid];
-    struct repository *repo = p->mem.ptr;
-    zero(repo, szof(repo));
-    m->repoid = !m->repoid;
-    m->repo[m->repoid] = repo;
-
-    /* I.) Setup repository memory layout */
-    repo->boxcnt = s->boxcnt;
-    repo->boxes = (struct box*)align(repo + 1, box_align);
-    repo->bfs = (struct box**)align(repo->boxes + repo->boxcnt, ptr_align);
-    repo->tbl.cnt = s->tblcnt;
-    repo->tbl.keys = (uiid*)align(repo->bfs + repo->boxcnt + 1, uiid_align);
-    repo->tbl.vals = (int*)align(repo->tbl.keys + repo->tbl.cnt, int_align);
-    repo->params = (union param*)align(repo->tbl.vals + repo->tbl.cnt, param_align);
-    repo->buf = (char*)(repo->params + s->argcnt);
-    repo->depth = s->tree_depth + 1;
-    repo->tree_depth = s->tree_depth + 1;
-    repo->bufsiz = s->total_buf_size;
-    repo->boxcnt = 1;
-    repo->size = p->mem.size;
-
-    /* setup sub-tree root box */
-    m->root = repo->boxes;
-    m->root->buf = repo->buf;
-    m->root->params = repo->params;
-    m->root->flags = 0;
-    m->root->type = WIDGET_TREE_ROOT;
-    list_init(&m->root->node);
-    list_init(&m->root->lnks);
-
-    /* II.) Setup repository data */
-    {struct gizmo {int type, params, argi, argc;} gstk[MAX_TREE_DEPTH];
-    struct box *boxstk[MAX_TREE_DEPTH];
-    int gtop = 0, depth = 1;
-    int buf_off = 0, buf_size = 0;
-
-    struct buffer *buf = s->buf_list;
-    struct param_buffer *ob = s->param_list;
-    union param *op = &ob->ops[s->op_begin];
-    boxstk[0] = repo->boxes;
-    while (1) {
-        switch (op[0].op) {
-        /* ---------------------------- Buffer -------------------------- */
-        case OP_BUF_END:
-            goto eol0;
-        case OP_NEXT_BUF:
-            ob = (struct param_buffer*)op[1].p;
-            op = ob->ops;
-            continue;
-        case OP_BUF_BEGIN: {
-            assert(op[1].mid == s->id);
-        } break;
-        case OP_BUF_ULINK: {
-            /* find parent module */
-            struct repository *prepo = 0;
-            struct module *pm = module_find(ctx, op[1].mid);
-            if (!pm) break;
-            prepo = pm->repo[pm->repoid];
-            if (!prepo) break;
-
-            /* link module root box into parent module box */
-            {int idx = lookup(&prepo->tbl, op[2].id);
-            struct box *pb = prepo->boxes + idx;
-            struct box *b = m->root;
-            list_del(&b->node);
-            list_add_tail(&pb->lnks, &b->node);
-            repo->tree_depth = prepo->tree_depth + pb->depth + 1;
-            b->parent = pb;}
-
-            /* relink child module directly after parent */
-            list_del(&m->hook);
-            list_add_tail(&ctx->mod, &m->hook);
-            m->parent = pm;
-        } break;
-        case OP_BUF_DLINK: {
-            /* find child module */
-            struct repository *crepo = 0;
-            struct module *cm = module_find(ctx, op[1].mid);
-            assert(cm);
-            if (!cm || !cm->root) break;
-            crepo = cm->repo[cm->repoid];
-            assert(crepo);
-            if (!crepo) break;
-
-            /* link referenced module root box into current box in module */
-            assert(depth > 0);
-            {struct box *pb = boxstk[depth-1];
-            struct box *b = cm->root;
-            list_del(&b->node);
-            list_add_tail(&pb->lnks, &b->node);
-            crepo->tree_depth = repo->tree_depth + depth + 1;
-            b->parent = pb;}
-
-            /* relink child module directly after parent */
-            list_del(&cm->hook);
-            list_add_tail(&ctx->mod, &cm->hook);
-            cm->parent = m;
-        } break;
-        case OP_BUF_CONECT: {
-            /* setup lifetime connection */
-            struct module *pm = module_find(ctx, op[1].mid);
-            assert(pm);
-            if (!pm) break;
-            m->owner = pm;
-            m->rel = (enum relationship)op[2].i;
-        } break;
-
-        /* --------------------------- Widgets -------------------------- */
-        case OP_WIDGET_BEGIN: {
-            /* push new widet on stack */
-            struct gizmo *g = &gstk[gtop++];
-            assert(gtop < MAX_TREE_DEPTH);
-            g->type = op[1].type;
-            g->params = repo->argcnt;
-            g->argi = 0, g->argc = op[2].i;
-            repo->argcnt += g->argc;
-        } break;
-        case OP_WIDGET_END:
-            assert(gtop > 0); gtop--; break;
-
-        /* -------------------------- Parameter ------------------------- */
-        case OP_PUSH_STR:
-        case OP_PUSH_FLOAT:
-        case OP_PUSH_INT:
-        case OP_PUSH_UINT:
-        case OP_PUSH_ID:
-        case OP_PUSH_MID: {
-            struct gizmo *g = &gstk[max(0,gtop-1)];
-            assert(gtop > 0);
-            assert(g->argi < g->argc);
-            if (g->argi >= g->argc) break;
-
-            {int idx = g->params + g->argi++;
-            switch (op[0].op) {
-                case OP_PUSH_STR: {
-                    int len = op[1].i;
-                    repo->params[idx].i = buf_off;
-                    assert(buf_off < repo->bufsiz);
-                    if (buf_off + len > MAX_STR_BUF) {
-                        assert(buf->next);
-                        buf = buf->next;
-                        buf_off = 0;
-                    } copy(repo->buf + buf_size, buf->buf + buf_off, len);
-                    buf_size += len;
-                    buf_off += len;
-                } break;
-                case OP_PUSH_FLOAT:
-                    repo->params[idx].f = op[1].f; break;
-                case OP_PUSH_INT:
-                    repo->params[idx].i = op[1].i; break;
-                case OP_PUSH_UINT:
-                    repo->params[idx].u = op[1].u; break;
-                case OP_PUSH_ID:
-                    repo->params[idx].id = op[1].id; break;
-                case OP_PUSH_MID:
-                    repo->params[idx].mid = op[1].mid; break;
-            }}
-        } break;
-
-        /* ---------------------------- Boxes ----------------------------*/
-        case OP_BOX_POP:
-            assert(depth > 1); depth--; break;
-        case OP_BOX_PUSH: {
-            struct gizmo *g = 0;
-            uiid id = op[1].id;
-            int idx = repo->boxcnt++;
-            struct box *pb = boxstk[depth-1];
-            insert(&repo->tbl, id, idx);
-            assert(gtop > 0);
-            g = &gstk[gtop-1];
-
-            /* setup box */
-            {struct box *b = repo->boxes + idx;
-            b->id = id;
-            b->flags = 0;
-            b->parent = pb;
-            b->type = g->type;
-            b->wid = op[2].id;
-            b->buf = repo->buf;
-            b->params = repo->params + g->params;
-            b->depth = cast(unsigned short, depth);
-
-            /* link box into parent */
-            list_init(&b->node);
-            list_init(&b->lnks);
-
-            /* update tracked hot boxes */
-            list_add_tail(&pb->lnks, &b->node);
-            if (b->id == ctx->active->id)
-                ctx->active = b;
-            if (b->id == ctx->origin->id)
-                ctx->origin = b;
-            if (b->id == ctx->hot->id)
-                ctx->hot = b;
-
-            /* push box into stack */
-            assert(depth < MAX_TREE_DEPTH);
-            boxstk[depth++] = b;}
-        } break;
-        /* -------------------------- Properties -------------------------*/
-        case OP_PROPERTY_SET: {
-            assert(depth > 0);
-            {struct box *b = boxstk[depth-1];
-            b->flags |= op[1].u;}
-        } break;
-        case OP_PROPERTY_CLR: {
-            assert(depth > 0);
-            {struct box *b = boxstk[depth-1];
-            b->flags &= ~op[1].u;}
-        } break;}
-        op += opdefs[op[0].op].argc + 1;
-    } eol0:;}
-
-    repo->bfs = bfs(repo->bfs, repo->boxes);
-    ctx->unbalanced = 1;
-    if (old) list_del(&old->boxes[0].node);
-    jmpto(ctx, STATE_COMMIT);
-    return p;
-}
 api union process*
 process_begin(struct context *ctx, unsigned flags)
 {
@@ -1743,25 +1517,6 @@ process_begin(struct context *ctx, unsigned flags)
             jmpto(ctx, STATE_COMMIT);
         else jmpto(ctx, STATE_DONE);
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     case STATE_COMMIT: {
         struct state *s = 0;
         union process *p = &ctx->proc;
@@ -1860,19 +1615,229 @@ process_begin(struct context *ctx, unsigned flags)
         return p;
     }
     case STATE_COMPILE: {
+        union process *p = &ctx->proc;
+        struct state *s = list_entry(ctx->iter, struct state, hook);
+        struct module *m = s->mod;
 
+        struct repository *old = m->repo[m->repoid];
+        struct repository *repo = p->mem.ptr;
+        zero(repo, szof(repo));
+        m->repoid = !m->repoid;
+        m->repo[m->repoid] = repo;
+
+        /* I.) Setup repository memory layout */
+        repo->boxcnt = s->boxcnt;
+        repo->boxes = (struct box*)align(repo + 1, box_align);
+        repo->bfs = (struct box**)align(repo->boxes + repo->boxcnt, ptr_align);
+        repo->tbl.cnt = s->tblcnt;
+        repo->tbl.keys = (uiid*)align(repo->bfs + repo->boxcnt + 1, uiid_align);
+        repo->tbl.vals = (int*)align(repo->tbl.keys + repo->tbl.cnt, int_align);
+        repo->params = (union param*)align(repo->tbl.vals + repo->tbl.cnt, param_align);
+        repo->buf = (char*)(repo->params + s->argcnt);
+        repo->depth = s->tree_depth + 1;
+        repo->tree_depth = s->tree_depth + 1;
+        repo->bufsiz = s->total_buf_size;
+        repo->boxcnt = 1;
+        repo->size = p->mem.size;
+
+        /* setup sub-tree root box */
+        m->root = repo->boxes;
+        m->root->buf = repo->buf;
+        m->root->params = repo->params;
+        m->root->flags = 0;
+        m->root->type = WIDGET_TREE_ROOT;
+        list_init(&m->root->node);
+        list_init(&m->root->lnks);
+
+        /* II.) Setup repository data */
+        {struct gizmo {int type, params, argi, argc;} gstk[MAX_TREE_DEPTH];
+        struct box *boxstk[MAX_TREE_DEPTH];
+        int gtop = 0, depth = 1;
+        int buf_off = 0, buf_size = 0;
+
+        struct buffer *buf = s->buf_list;
+        struct param_buffer *ob = s->param_list;
+        union param *op = &ob->ops[s->op_begin];
+        boxstk[0] = repo->boxes;
+        while (1) {
+            switch (op[0].op) {
+            /* ---------------------------- Buffer -------------------------- */
+            case OP_BUF_END:
+                goto eol0;
+            case OP_NEXT_BUF:
+                ob = (struct param_buffer*)op[1].p;
+                op = ob->ops;
+                continue;
+            case OP_BUF_BEGIN: {
+                assert(op[1].mid == s->id);
+            } break;
+            case OP_BUF_ULINK: {
+                /* find parent module */
+                struct repository *prepo = 0;
+                struct module *pm = module_find(ctx, op[1].mid);
+                if (!pm) break;
+                prepo = pm->repo[pm->repoid];
+                if (!prepo) break;
+
+                /* link module root box into parent module box */
+                {int idx = lookup(&prepo->tbl, op[2].id);
+                struct box *pb = prepo->boxes + idx;
+                struct box *b = m->root;
+                list_del(&b->node);
+                list_add_tail(&pb->lnks, &b->node);
+                repo->tree_depth = prepo->tree_depth + pb->depth + 1;
+                b->parent = pb;}
+
+                /* relink child module directly after parent */
+                list_del(&m->hook);
+                list_add_tail(&ctx->mod, &m->hook);
+                m->parent = pm;
+            } break;
+            case OP_BUF_DLINK: {
+                /* find child module */
+                struct repository *crepo = 0;
+                struct module *cm = module_find(ctx, op[1].mid);
+                assert(cm);
+                if (!cm || !cm->root) break;
+                crepo = cm->repo[cm->repoid];
+                assert(crepo);
+                if (!crepo) break;
+
+                /* link referenced module root box into current box in module */
+                assert(depth > 0);
+                {struct box *pb = boxstk[depth-1];
+                struct box *b = cm->root;
+                list_del(&b->node);
+                list_add_tail(&pb->lnks, &b->node);
+                crepo->tree_depth = repo->tree_depth + depth + 1;
+                b->parent = pb;}
+
+                /* relink child module directly after parent */
+                list_del(&cm->hook);
+                list_add_tail(&ctx->mod, &cm->hook);
+                cm->parent = m;
+            } break;
+            case OP_BUF_CONECT: {
+                /* setup lifetime connection */
+                struct module *pm = module_find(ctx, op[1].mid);
+                assert(pm);
+                if (!pm) break;
+                m->owner = pm;
+                m->rel = (enum relationship)op[2].i;
+            } break;
+
+            /* --------------------------- Widgets -------------------------- */
+            case OP_WIDGET_BEGIN: {
+                /* push new widet on stack */
+                struct gizmo *g = &gstk[gtop++];
+                assert(gtop < MAX_TREE_DEPTH);
+                g->type = op[1].type;
+                g->params = repo->argcnt;
+                g->argi = 0, g->argc = op[2].i;
+                repo->argcnt += g->argc;
+            } break;
+            case OP_WIDGET_END:
+                assert(gtop > 0); gtop--; break;
+
+            /* -------------------------- Parameter ------------------------- */
+            case OP_PUSH_STR:
+            case OP_PUSH_FLOAT:
+            case OP_PUSH_INT:
+            case OP_PUSH_UINT:
+            case OP_PUSH_ID:
+            case OP_PUSH_MID: {
+                struct gizmo *g = &gstk[max(0,gtop-1)];
+                assert(gtop > 0);
+                assert(g->argi < g->argc);
+                if (g->argi >= g->argc) break;
+
+                {int idx = g->params + g->argi++;
+                switch (op[0].op) {
+                    case OP_PUSH_STR: {
+                        int len = op[1].i;
+                        repo->params[idx].i = buf_off;
+                        assert(buf_off < repo->bufsiz);
+                        if (buf_off + len > MAX_STR_BUF) {
+                            assert(buf->next);
+                            buf = buf->next;
+                            buf_off = 0;
+                        } copy(repo->buf + buf_size, buf->buf + buf_off, len);
+                        buf_size += len;
+                        buf_off += len;
+                    } break;
+                    case OP_PUSH_FLOAT:
+                        repo->params[idx].f = op[1].f; break;
+                    case OP_PUSH_INT:
+                        repo->params[idx].i = op[1].i; break;
+                    case OP_PUSH_UINT:
+                        repo->params[idx].u = op[1].u; break;
+                    case OP_PUSH_ID:
+                        repo->params[idx].id = op[1].id; break;
+                    case OP_PUSH_MID:
+                        repo->params[idx].mid = op[1].mid; break;
+                }}
+            } break;
+
+            /* ---------------------------- Boxes ----------------------------*/
+            case OP_BOX_POP:
+                assert(depth > 1); depth--; break;
+            case OP_BOX_PUSH: {
+                struct gizmo *g = 0;
+                uiid id = op[1].id;
+                int idx = repo->boxcnt++;
+                struct box *pb = boxstk[depth-1];
+                insert(&repo->tbl, id, idx);
+                assert(gtop > 0);
+                g = &gstk[gtop-1];
+
+                /* setup box */
+                {struct box *b = repo->boxes + idx;
+                b->id = id;
+                b->flags = 0;
+                b->parent = pb;
+                b->type = g->type;
+                b->wid = op[2].id;
+                b->buf = repo->buf;
+                b->params = repo->params + g->params;
+                b->depth = cast(unsigned short, depth);
+
+                /* link box into parent */
+                list_init(&b->node);
+                list_init(&b->lnks);
+
+                /* update tracked hot boxes */
+                list_add_tail(&pb->lnks, &b->node);
+                if (b->id == ctx->active->id)
+                    ctx->active = b;
+                if (b->id == ctx->origin->id)
+                    ctx->origin = b;
+                if (b->id == ctx->hot->id)
+                    ctx->hot = b;
+
+                /* push box into stack */
+                assert(depth < MAX_TREE_DEPTH);
+                boxstk[depth++] = b;}
+            } break;
+            /* -------------------------- Properties -------------------------*/
+            case OP_PROPERTY_SET: {
+                assert(depth > 0);
+                {struct box *b = boxstk[depth-1];
+                b->flags |= op[1].u;}
+            } break;
+            case OP_PROPERTY_CLR: {
+                assert(depth > 0);
+                {struct box *b = boxstk[depth-1];
+                b->flags &= ~op[1].u;}
+            } break;}
+            op += opdefs[op[0].op].argc + 1;
+        } eol0:;}
+
+        repo->bfs = bfs(repo->bfs, repo->boxes);
+        ctx->unbalanced = 1;
+        if (old) list_del(&old->boxes[0].node);
+        jmpto(ctx, STATE_COMMIT);
+        return p;
     }
-
-
-
-
-
-
-
-
-
-
-
     case STATE_BLUEPRINT: {
         struct module *m = 0;
         struct repository *r = 0;
