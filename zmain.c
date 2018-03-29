@@ -510,10 +510,7 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
     /* Process: Paint */
     while ((p = process_begin(ctx, PROCESS_PAINT))) {
         switch (p->type) {default:break;
-        case PROC_ALLOC_FRAME:
-        case PROC_ALLOC:
-            /* not called unless PROC_INPUT generates new UI */
-            p->mem.ptr = calloc((size_t)p->mem.size,1); break;
+        case PROC_COMMIT: commit(p); break;
         case PROC_BLUEPRINT: {
             /* not called unless PROC_INPUT generates new UI */
             struct process_layouting *op = &p->layout;
@@ -580,6 +577,16 @@ ui_event(struct context *ctx, const SDL_Event *evt)
             input_shortcut(ctx, SHORTCUT_SCROLL_BOX_PGDN, down);
         input_key(ctx, sym, down);
     } break;}
+}
+static void
+ui_commit(struct context *ctx)
+{
+    union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_COMMIT))) {
+        assert(p->type == PROC_COMMIT);
+        commit(p);
+        process_end(p);
+    }
 }
 
 /* ===========================================================================
@@ -658,8 +665,8 @@ ui_build_serialized_tables(FILE *fp)
         } panel_box_end(s, &pan, 0);
         end(s);
     }}
-    /*trace(ctx, stdout);*/
-    commit(ctx);
+    /*trace(stdout, ctx);*/
+    ui_commit(ctx);
     store_table(fp, ctx, "ui", 4);
     cleanup(ctx);
 }
@@ -833,24 +840,27 @@ icon_label(struct state *s, int icon_id, const char *lbl)
 static void
 ui_sidebar(struct state *s)
 {
-    /* Sidebar */
-    {struct sidebar sb = sidebar_begin(s);
-        static const char *folder[] = {"Documents", "Download", "Desktop",
-            "Images", "boot", "dev", "lib", "include", "tmp", "usr", "root"};
+    static const char *folders[] = {
+        "Documents", "Download",
+        "Desktop", "Images",
+        "boot", "dev", "lib",
+        "include", "tmp",
+        "usr", "root"
+    }; int i = 0;
 
-        int i = 0;
+    struct sidebar sb = sidebar_begin(s); {
         sborder_begin(s);
         scroll_region_begin(s); {
             struct flex_box fbx = flex_box_begin(s);
             *fbx.flow = FLEX_BOX_WRAP, *fbx.padding = 0;
-            for (i = 0; i < cntof(folder); ++i) {
+            for (i = 0; i < cntof(folders); ++i) {
                 flex_box_slot_static(s, &fbx, 60);
-                if (icon_label(s, ICON_FOLDER, folder[i]))
-                    printf("Button: %s clicked\n", folder[i]);
+                if (icon_label(s, ICON_FOLDER, folders[i]))
+                    printf("Button: %s clicked\n", folders[i]);
             } flex_box_end(s, &fbx);
         } scroll_region_end(s);
         sborder_end(s);
-    sidebar_end(s, &sb);}
+    } sidebar_end(s, &sb);
 }
 static void
 ui_immedate_mode(struct state *s)
@@ -931,39 +941,13 @@ ui_immedate_mode(struct state *s)
     } panel_box_end(s, &pan, 0);
 }
 static void
-ui_main(struct context *ctx)
-{
-    struct state *s = 0;
-    if ((s = begin(ctx, id("Main")))) {
-        ui_sidebar(s);
-        /* Panels */
-        {struct overlap_box obx = overlap_box_begin(s);
-        overlap_box_slot(s, &obx, id("Immdiate Mode")); {
-            window_begin(s, 600, 50, 180, 250);
-            ui_immedate_mode(s);
-            window_end(s);
-        }
-        overlap_box_slot(s, &obx, id("Retained Mode")); {
-            window_begin(s, 320, 50, 200, 130);
-            link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
-            window_end(s);
-        }
-        overlap_box_slot(s, &obx, id("Compile Time")); {
-            window_begin(s, 320, 250, 200, 130);
-            link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
-            window_end(s);
-        }
-        overlap_box_end(s, &obx);}
-    } end(s);
-}
-static void
-ui_update(struct context *ctx, struct NVGcontext *vg, struct ui_retained *ui)
+ui_run(struct context *ctx, struct NVGcontext *vg, struct ui_retained *ui)
 {
     /* Process: Input */
-    commit(ctx);
     {int i; union process *p = 0;
     while ((p = process_begin(ctx, PROCESS_INPUT))) {
         switch (p->type) {default:break;
+        case PROC_COMMIT: commit(p); break;
         case PROC_BLUEPRINT: {
             struct process_layouting *op = &p->layout;
             for (i = op->begin; i != op->end; i += op->inc)
@@ -979,7 +963,7 @@ ui_update(struct context *ctx, struct NVGcontext *vg, struct ui_retained *ui)
             struct process_input *op = &p->input;
             list_foreach(it, &op->evts) {
                 union event *evt = list_entry(it, union event, hdr.hook);
-                ui_input(p, evt); /* handle widget internal events */
+                ui_input(p, evt); /* handle widget events */
 
                 switch (evt->type) {
                 case EVT_CLICKED: {
@@ -1076,8 +1060,31 @@ int main(int argc, char *argv[])
             case SDL_QUIT: quit = 1; break;}
             ui_event(ctx, &evt);
         }}
-        ui_main(ctx);
-        ui_update(ctx, vg, &ui);
+        /* UI */
+        {struct state *s = 0;
+        if ((s = begin(ctx, id("Main")))) {
+            ui_sidebar(s);
+
+            /* Panels */
+            {struct overlap_box obx = overlap_box_begin(s);
+            overlap_box_slot(s, &obx, id("Immdiate Mode")); {
+                window_begin(s, 600, 50, 180, 250);
+                ui_immedate_mode(s);
+                window_end(s);
+            }
+            overlap_box_slot(s, &obx, id("Retained Mode")); {
+                window_begin(s, 320, 50, 200, 130);
+                link(s, id("retained"), RELATIONSHIP_INDEPENDENT);
+                window_end(s);
+            }
+            overlap_box_slot(s, &obx, id("Compile Time")); {
+                window_begin(s, 320, 250, 200, 130);
+                link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
+                window_end(s);
+            }
+            overlap_box_end(s, &obx);}
+        } end(s);}
+        ui_run(ctx, vg, &ui);
 
         /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);

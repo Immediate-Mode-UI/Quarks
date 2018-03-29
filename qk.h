@@ -178,6 +178,7 @@ struct container {
     PROP(MOVABLE_X)\
     PROP(MOVABLE_Y)\
     PROP(HIDDEN)
+
 enum property_index {
 #define PROP(p) BOX_ ## p ## _INDEX,
     PROPERTY_MAP(PROP)
@@ -398,34 +399,53 @@ union event {
     struct event_key shortcut;
 };
 
+/* operation */
+struct object;
+enum operation_type {
+    OP_ALLOC_PERSISTENT,
+    OP_ALLOC_FRAME,
+    OP_COMPILE
+};
+struct operation_alloc {
+    void *ptr;
+    int size;
+};
+struct operation {
+    enum operation_type type;
+    struct operation_alloc alloc;
+    struct object *obj;
+};
+struct object {
+    int state;
+    struct operation op;
+    struct context *ctx;
+    struct state *in;
+    struct repository *out;
+};
+
 /* process */
 enum process_type {
-    /* clear */
-    PROC_CLEAR,
-    PROC_FULL_CLEAR,
-    PROC_CLEANUP,
-    /* memory */
-    PROC_ALLOC_PERSISTENT,
-    PROC_ALLOC_FRAME,
-    PROC_FREE_PERSISTENT,
-    PROC_FREE_FRAME,
-    /* process */
     PROC_COMMIT,
     PROC_BLUEPRINT,
     PROC_LAYOUT,
     PROC_INPUT,
     PROC_PAINT,
+    PROC_CLEAR,
+    PROC_CLEAR_FULL,
+    PROC_CLEANUP,
+    PROC_FREE_PERSISTENT,
+    PROC_FREE_FRAME,
     PROC_CNT
 };
 enum processes {
-    PROCESS_CLEAR = flag(PROC_CLEAR),
-    PROCESS_FULL_CLEAR = PROCESS_CLEAR|flag(PROC_FULL_CLEAR),
     PROCESS_COMMIT = flag(PROC_COMMIT),
     PROCESS_BLUEPRINT = PROCESS_COMMIT|flag(PROC_BLUEPRINT),
     PROCESS_LAYOUT = PROCESS_BLUEPRINT|flag(PROC_LAYOUT),
     PROCESS_INPUT = PROCESS_LAYOUT|flag(PROC_INPUT),
     PROCESS_PAINT = PROCESS_LAYOUT|flag(PROC_PAINT),
-    PROCESS_CLEANUP = PROCESS_FULL_CLEAR|flag(PROC_CLEANUP)
+    PROCESS_CLEAR = flag(PROC_CLEAR),
+    PROCESS_CLEAR_FULL = PROCESS_CLEAR|flag(PROC_CLEAR_FULL),
+    PROCESS_CLEANUP = PROCESS_CLEAR_FULL|flag(PROC_CLEANUP)
 };
 struct process_header {
     enum process_type type;
@@ -433,10 +453,10 @@ struct process_header {
     struct memory_arena *arena;
     struct temp_memory tmp;
 };
-struct process_memory {
+struct process_commit {
     struct process_header hdr;
-    void *ptr;
-    int size;
+    struct object *objs;
+    int cnt;
 };
 struct process_layouting {
     struct process_header hdr;
@@ -454,13 +474,22 @@ struct process_paint {
     struct box **boxes;
     int cnt;
 };
+struct process_free {
+    struct process_header hdr;
+    void *ptr;
+};
+/* process */
 union process {
+    /* base */
     enum process_type type;
     struct process_header hdr;
-    struct process_memory mem;
+    /* process */
+    struct process_commit commit;
     struct process_layouting layout;
+    struct process_layouting blueprint;
     struct process_input input;
     struct process_paint paint;
+    struct process_free free;
 };
 
 /* context */
@@ -534,15 +563,12 @@ api int init(struct context *ctx, const struct allocator *a, const struct config
 api void load(struct context *ctx, const struct container *c, int cnt);
 api struct box *query(struct context *ctx, unsigned mid, uiid id);
 api void reset(struct context *ctx);
-api void clear(struct context *ctx);
-api void cleanup(struct context *ctx);
-api void commit(struct context *ctx);
 api void destroy(struct context *ctx);
 
 /* serialize */
 api void store_table(FILE *fp, struct context *ctx, const char *name, int indent);
 api void store_binary(FILE *fp, struct context *ctx);
-api void trace(struct context *ctx, FILE *fp);
+api void trace(FILE *fp, struct context *ctx);
 
 /* input */
 api void input_char(struct context *ctx, char c);
@@ -557,6 +583,10 @@ api void input_button(struct context *ctx, enum mouse_button btn, int down);
 
 /* process */
 api union process* process_begin(struct context *ctx, unsigned flags);
+api struct operation *commit_begin(struct context *ctx, struct process_commit*, int index);
+api int compile(struct object *obj);
+api void commit_end(struct operation *op);
+api void commit(union process *p);
 api void blueprint(union process *p, struct box *b);
 api void layout(union process *p, struct box *b);
 api void input(union process *p, union event *evt, struct box *b);
