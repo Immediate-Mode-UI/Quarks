@@ -64,6 +64,7 @@ struct block_allocator {
     const struct allocator *mem;
     struct list_hook freelist;
     struct list_hook blks;
+    volatile unsigned lock;
     int blkcnt;
 };
 struct temp_memory {
@@ -230,6 +231,7 @@ struct box {
 #define MAX_TREE_DEPTH 128
 #define MAX_OPS ((int)((DEFAULT_MEMORY_BLOCK_SIZE - sizeof(struct memory_block)) / sizeof(union param)))
 #define MAX_STR_BUF ((int)(DEFAULT_MEMORY_BLOCK_SIZE - (sizeof(struct memory_block) + sizeof(void*))))
+#define MAX_CMD_BUF ((int)((DEFAULT_MEMORY_BLOCK_SIZE - (sizeof(struct memory_block) + sizeof(void*))) / sizeof(union cmd)))
 
 struct repository;
 struct idrange {
@@ -241,11 +243,11 @@ struct widget {
     int type;
     int *argc;
 };
-struct param_buffer {
+struct param_buf {
     union param ops[MAX_OPS];
 };
-struct buffer {
-    struct buffer *next;
+struct str_buf {
+    struct str_buf *next;
     char buf[MAX_STR_BUF];
 };
 enum relationship {
@@ -276,13 +278,13 @@ struct state {
 
     /* opcodes */
     int op_begin, op_idx;
-    struct param_buffer *param_list;
-    struct param_buffer *opbuf;
+    struct param_buf *param_list;
+    struct param_buf *opbuf;
 
     /* strings */
     int buf_off, total_buf_size;
-    struct buffer *buf_list;
-    struct buffer *buf;
+    struct str_buf *buf_list;
+    struct str_buf *buf;
 
     /* ID generator */
     uiid lastid, otid;
@@ -399,6 +401,40 @@ union event {
     struct event_key shortcut;
 };
 
+/* commands */
+enum cmd_type {
+    CMD_LNK,
+    CMD_CONCT,
+    CMD_CNT
+};
+struct cmd_link {
+    enum cmd_type type;
+    mid parent_mid;
+    uiid parent_id;
+    mid child_mid;
+    uiid child_id;
+};
+struct cmd_connect {
+    enum cmd_type type;
+    mid parent, child;
+    int rel;
+};
+union cmd {
+    enum cmd_type type;
+    struct cmd_link lnk;
+    struct cmd_connect con;
+};
+struct cmd_block {
+    struct cmd_block *next;
+    union cmd cmds[MAX_CMD_BUF];
+};
+struct cmd_buf {
+    int idx;
+    struct cmd_block *list;
+    struct cmd_block *buf;
+    volatile unsigned lock;
+};
+
 /* operation */
 struct object;
 enum operation_type {
@@ -421,6 +457,8 @@ struct object {
     struct context *ctx;
     struct state *in;
     struct repository *out;
+    struct cmd_buf *cmds;
+    struct memory_arena *mem;
 };
 
 /* process */
@@ -457,6 +495,7 @@ struct process_commit {
     struct process_header hdr;
     struct object *objs;
     int cnt;
+    struct cmd_buf lnks;
 };
 struct process_layouting {
     struct process_header hdr;
@@ -478,12 +517,11 @@ struct process_free {
     struct process_header hdr;
     void *ptr;
 };
-/* process */
 union process {
     /* base */
     enum process_type type;
     struct process_header hdr;
-    /* process */
+    /* derived */
     struct process_commit commit;
     struct process_layouting layout;
     struct process_layouting blueprint;
@@ -533,8 +571,10 @@ struct context {
     struct allocator mem;
     struct block_allocator blkmem;
     struct memory_arena arena;
+    volatile unsigned mem_lock;
 
     /* modules */
+    volatile unsigned module_lock;
     struct list_hook states;
     struct list_hook mod;
     struct list_hook garbage;
@@ -560,12 +600,12 @@ struct context {
 /* context */
 api struct context *create(const struct allocator *a, const struct config *cfg);
 api int init(struct context *ctx, const struct allocator *a, const struct config *cfg);
-api void load(struct context *ctx, const struct container *c, int cnt);
 api struct box *query(struct context *ctx, unsigned mid, uiid id);
 api void reset(struct context *ctx);
 api void destroy(struct context *ctx);
 
 /* serialize */
+api void load(struct context *ctx, const struct container *c, int cnt);
 api void store_table(FILE *fp, struct context *ctx, const char *name, int indent);
 api void store_binary(FILE *fp, struct context *ctx);
 api void trace(FILE *fp, struct context *ctx);

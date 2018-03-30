@@ -421,6 +421,59 @@ nvgSidebarBar(struct NVGcontext *vg, struct box *b)
  *                                  PLATFORM
  * --------------------------------------------------------------------------- */
 static void
+ui_sdl_event(struct context *ctx, const SDL_Event *evt)
+{
+    assert(ctx);
+    assert(evt);
+    switch (evt->type) {
+    case SDL_MOUSEMOTION: input_motion(ctx, evt->motion.x, evt->motion.y); break;
+    case SDL_MOUSEWHEEL: input_scroll(ctx, evt->wheel.x, evt->wheel.y); break;
+    case SDL_TEXTINPUT: input_text(ctx, txt(evt->text.text)); break;
+    case SDL_WINDOWEVENT: {
+         if (evt->window.event == SDL_WINDOWEVENT_RESIZED ||
+            evt->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
+            input_resize(ctx, evt->window.data1, evt->window.data2);
+    } break;
+    case SDL_MOUSEBUTTONUP:
+    case SDL_MOUSEBUTTONDOWN: {
+        int down = (evt->type == SDL_MOUSEBUTTONDOWN);
+        if (evt->button.button == SDL_BUTTON_LEFT)
+            input_button(ctx, MOUSE_BUTTON_LEFT, down);
+        else if (evt->button.button == SDL_BUTTON_RIGHT)
+            input_button(ctx, MOUSE_BUTTON_RIGHT, down);
+        else if (evt->button.button == SDL_BUTTON_MIDDLE)
+            input_button(ctx, MOUSE_BUTTON_MIDDLE, down);
+    } break;
+    case SDL_KEYUP:
+    case SDL_KEYDOWN: {
+        int down = (evt->type == SDL_KEYDOWN);
+        SDL_Keycode sym = evt->key.keysym.sym;
+        if (sym == SDLK_BACKSPACE)
+            input_shortcut(ctx, SHORTCUT_SCROLL_REGION_RESET, down);
+        else if (sym == SDLK_LALT)
+            input_shortcut(ctx, SHORTCUT_SCROLL_REGION_SCROLL, down);
+        else if (sym == SDLK_HOME)
+            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_BEGIN, down);
+        else if (sym == SDLK_END)
+            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_END, down);
+        else if (sym == SDLK_PAGEUP)
+            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_PGUP, down);
+        else if (sym == SDLK_PAGEDOWN)
+            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_PGDN, down);
+        input_key(ctx, sym, down);
+    } break;}
+}
+static void
+ui_commit(struct context *ctx)
+{
+    union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_COMMIT))) {
+        assert(p->type == PROC_COMMIT);
+        commit(p);
+        process_end(p);
+    }
+}
+static void
 ui_blueprint(struct NVGcontext *vg, union process *p, struct box *b)
 {
     switch (b->type) {
@@ -536,55 +589,30 @@ ui_paint(struct NVGcontext *vg, struct context *ctx, int w, int h)
     }
 }
 static void
-ui_event(struct context *ctx, const SDL_Event *evt)
+ui_run(struct context *ctx, struct NVGcontext *vg)
 {
-    assert(ctx);
-    assert(evt);
-    switch (evt->type) {
-    case SDL_MOUSEMOTION: input_motion(ctx, evt->motion.x, evt->motion.y); break;
-    case SDL_MOUSEWHEEL: input_scroll(ctx, evt->wheel.x, evt->wheel.y); break;
-    case SDL_TEXTINPUT: input_text(ctx, txt(evt->text.text)); break;
-    case SDL_WINDOWEVENT: {
-         if (evt->window.event == SDL_WINDOWEVENT_RESIZED ||
-            evt->window.event == SDL_WINDOWEVENT_SIZE_CHANGED)
-            input_resize(ctx, evt->window.data1, evt->window.data2);
-    } break;
-    case SDL_MOUSEBUTTONUP:
-    case SDL_MOUSEBUTTONDOWN: {
-        int down = (evt->type == SDL_MOUSEBUTTONDOWN);
-        if (evt->button.button == SDL_BUTTON_LEFT)
-            input_button(ctx, MOUSE_BUTTON_LEFT, down);
-        else if (evt->button.button == SDL_BUTTON_RIGHT)
-            input_button(ctx, MOUSE_BUTTON_RIGHT, down);
-        else if (evt->button.button == SDL_BUTTON_MIDDLE)
-            input_button(ctx, MOUSE_BUTTON_MIDDLE, down);
-    } break;
-    case SDL_KEYUP:
-    case SDL_KEYDOWN: {
-        int down = (evt->type == SDL_KEYDOWN);
-        SDL_Keycode sym = evt->key.keysym.sym;
-        if (sym == SDLK_BACKSPACE)
-            input_shortcut(ctx, SHORTCUT_SCROLL_REGION_RESET, down);
-        else if (sym == SDLK_LALT)
-            input_shortcut(ctx, SHORTCUT_SCROLL_REGION_SCROLL, down);
-        else if (sym == SDLK_HOME)
-            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_BEGIN, down);
-        else if (sym == SDLK_END)
-            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_END, down);
-        else if (sym == SDLK_PAGEUP)
-            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_PGUP, down);
-        else if (sym == SDLK_PAGEDOWN)
-            input_shortcut(ctx, SHORTCUT_SCROLL_BOX_PGDN, down);
-        input_key(ctx, sym, down);
-    } break;}
-}
-static void
-ui_commit(struct context *ctx)
-{
-    union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_COMMIT))) {
-        assert(p->type == PROC_COMMIT);
-        commit(p);
+    int i; union process *p = 0;
+    while ((p = process_begin(ctx, PROCESS_INPUT))) {
+        switch (p->type) {default:break;
+        case PROC_COMMIT: commit(p); break;
+        case PROC_BLUEPRINT: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc)
+                ui_blueprint(vg, p, op->boxes[i]);
+        } break;
+        case PROC_LAYOUT: {
+            struct process_layouting *op = &p->layout;
+            for (i = op->begin; i != op->end; i += op->inc)
+                ui_layout(vg, p, op->boxes[i]);
+        } break;
+        case PROC_INPUT: {
+            struct list_hook *it = 0;
+            struct process_input *op = &p->input;
+            list_foreach(it, &op->evts) {
+                union event *evt = list_entry(it, union event, hdr.hook);
+                ui_input(p, evt); /* handle widget events */
+           }
+        } break;}
         process_end(p);
     }
 }
@@ -604,7 +632,7 @@ ui_build_retained(struct context *ctx, struct ui_retained *ui, const char *label
 {
     struct state *s = 0;
     ui->id = id("retained");
-    if ((s = begin(ctx, ui->id))) {
+    s = begin(ctx, ui->id); {
         struct panel pan = panel_box_begin(s, "Retained"); {
             {struct flex_box fbx = flex_box_begin(s);
             *fbx.orientation = FLEX_BOX_VERTICAL;
@@ -619,8 +647,7 @@ ui_build_retained(struct context *ctx, struct ui_retained *ui, const char *label
                 ui->sld = sliderf(s, 0.0f, &sld_val, 10.0f);}
             } flex_box_end(s, &fbx);}
         } panel_box_end(s, &pan, 0);
-        end(s);
-    }
+    } end(s);
 }
 static void
 ui_build_serialized_tables(FILE *fp)
@@ -940,75 +967,6 @@ ui_immedate_mode(struct state *s)
         } flex_box_end(s, &fbx);
     } panel_box_end(s, &pan, 0);
 }
-static void
-ui_run(struct context *ctx, struct NVGcontext *vg, struct ui_retained *ui)
-{
-    /* Process: Input */
-    {int i; union process *p = 0;
-    while ((p = process_begin(ctx, PROCESS_INPUT))) {
-        switch (p->type) {default:break;
-        case PROC_COMMIT: commit(p); break;
-        case PROC_BLUEPRINT: {
-            struct process_layouting *op = &p->layout;
-            for (i = op->begin; i != op->end; i += op->inc)
-                ui_blueprint(vg, p, op->boxes[i]);
-        } break;
-        case PROC_LAYOUT: {
-            struct process_layouting *op = &p->layout;
-            for (i = op->begin; i != op->end; i += op->inc)
-                ui_layout(vg, p, op->boxes[i]);
-        } break;
-        case PROC_INPUT: {
-            struct list_hook *it = 0;
-            struct process_input *op = &p->input;
-            list_foreach(it, &op->evts) {
-                union event *evt = list_entry(it, union event, hdr.hook);
-                ui_input(p, evt); /* handle widget events */
-
-                switch (evt->type) {
-                case EVT_CLICKED: {
-                    /* event driven input handling */
-                    for (i = 0; i < evt->hdr.cnt; i++) {
-                        struct box *b = evt->hdr.boxes[i];
-                        switch (b->type) {
-                        case WIDGET_BUTTON: {
-                            if (b->id == id("SERIALIZED_BUTTON"))
-                                fprintf(stdout, "serial button clicked\n");
-                            else if (b->id == id("SERIALIZED_BUTTON_CONFIG"))
-                                fprintf(stdout, "serial button: config clicked\n");
-                            else if (b->id == id("SERIALIZED_BUTTON_CHART"))
-                                fprintf(stdout, "serial button: chart clicked\n");
-                            else if (b->id == id("SERIALIZED_BUTTON_DESKTOP"))
-                                fprintf(stdout, "serial button: desktop clicked\n");
-                            else if (b->id == id("SERIALIZED_BUTTON_DOWNLOAD"))
-                                fprintf(stdout, "serial button: download clicked\n");
-                        } break;}
-                    }
-                } break;}
-            }
-        } break;}
-        process_end(p);
-    }}
-    /* event handling by polling */
-    {
-        /* button */
-        {struct button_state btn = {0};
-        button_label_query(ctx, &btn, ui->id, &ui->btn);
-        if (btn.clicked) fprintf(stdout, "Retained button clicked\n");
-        if (btn.pressed) fprintf(stdout, "Retained button pressed\n");
-        if (btn.released) fprintf(stdout, "Retained button released\n");
-        if (btn.entered) fprintf(stdout, "Retained button entered\n");
-        if (btn.exited) fprintf(stdout, "Retained button exited\n");}
-
-        /* slider */
-        {struct slider_state sld = {0};
-        slider_query(ctx, ui->id, &sld, &ui->sld);
-        if (sld.value_changed)
-            fprintf(stdout, "Retained slider value changed: %.2f\n", *ui->sld.value);
-        if (sld.entered) fprintf(stdout, "Retained slider entered\n");
-        if (sld.exited) fprintf(stdout, "Retained slider exited\n");}
-    }
-}
 int main(int argc, char *argv[])
 {
     enum fonts {FONT_HL, FONT_ICONS, FONT_CNT};
@@ -1038,8 +996,8 @@ int main(int argc, char *argv[])
 
     /* GUI */
     {struct config cfg;
-    cfg.font_default_id = fnts[FONT_HL];
     cfg.font_default_height = 16;
+    cfg.font_default_id = fnts[FONT_HL];
     ctx = create(DEFAULT_ALLOCATOR, &cfg);}
     input_resize(ctx, 1000, 600);
 
@@ -1058,7 +1016,7 @@ int main(int argc, char *argv[])
         while (SDL_PollEvent(&evt)) {
             switch (evt.type) {
             case SDL_QUIT: quit = 1; break;}
-            ui_event(ctx, &evt);
+            ui_sdl_event(ctx, &evt);
         }}
         /* UI */
         {struct state *s = 0;
@@ -1081,18 +1039,17 @@ int main(int argc, char *argv[])
                 window_begin(s, 320, 250, 200, 130);
                 link(s, id("serialized_tables"), RELATIONSHIP_INDEPENDENT);
                 window_end(s);
-            }
-            overlap_box_end(s, &obx);}
+            } overlap_box_end(s, &obx);}
         } end(s);}
-        ui_run(ctx, vg, &ui);
+        ui_run(ctx, vg);
 
         /* Paint */
         glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT|GL_STENCIL_BUFFER_BIT);
         glClearColor(0.10f, 0.18f, 0.24f, 1);
         nvgBeginFrame(vg, w, h, 1.0f);
         ui_paint(vg, ctx, w, h);
-        clear(ctx);
         nvgEndFrame(vg);
+        clear(ctx);
 
         /* Finish frame */
         SDL_GL_SwapWindow(win);

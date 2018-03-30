@@ -7,6 +7,7 @@
 #include <inttypes.h> /* PRIu64 */
 #include <limits.h> /* INT_MAX */
 #include <stdio.h> /* fprintf, fputc */
+#include <emmintrin.h> /* _mm_pause */
 
 /* constants */
 #define VERSION 1
@@ -68,10 +69,10 @@ static const struct component g_root = {
 };
 #define OPCODES(OP)\
     OP(BUF_BEGIN,       1,  MIDFMT)\
-    OP(BUF_ULINK,       2,  MIDFMT" "IDFMT)\
-    OP(BUF_DLINK,       1,  MIDFMT)\
-    OP(BUF_CONECT,      2,  MIDFMT" %d")\
     OP(BUF_END,         1,  MIDFMT)\
+    OP(ULNK,            2,  MIDFMT" "IDFMT)\
+    OP(DLNK,            1,  MIDFMT)\
+    OP(CONCT,           2,  MIDFMT" %d")\
     OP(WIDGET_BEGIN,    2,  "%d %d")\
     OP(WIDGET_END,      0,  "")  \
     OP(BOX_PUSH,        2,  IDFMT" "IDFMT)\
@@ -104,6 +105,37 @@ static const struct opdef {
     #undef OP
     {OPCNT,0,0}
 };
+/* ---------------------------------------------------------------------------
+ *                                  Platform
+ * --------------------------------------------------------------------------- */
+intern unsigned
+cas(volatile unsigned *dst, unsigned swap, unsigned cmp)
+{
+#if defined(_WIN32) && !(defined(__MINGW32__) || defined(__MINGW64__))
+    #pragma intrinsic(_InterlockedCompareExchange);
+    return _InterlockedCompareExchange((volatile long*)dst, swap, cmp);
+#else
+    return __sync_val_compare_and_swap(dst, cmp, swap);
+#endif
+}
+intern void
+spinlock_begin(volatile unsigned *lock)
+{
+    int i, mask = 1;
+    static const int max = 64;
+    while (cas(lock, 1, 0) != 0) {
+        for (i = mask; i; --i)
+            _mm_pause();
+        mask = mask < max ? mask << 1: max;
+    }
+}
+intern void
+spinlock_end(volatile unsigned *slock)
+{
+    _mm_sfence();
+    *slock = 0;
+}
+
 /* ---------------------------------------------------------------------------
  *                                  Math
  * --------------------------------------------------------------------------- */
@@ -427,6 +459,7 @@ block_alloc(struct block_allocator *a, int blksz)
     assert(a->mem);
     assert(a->mem->alloc);
 
+    spinlock_begin(&a->lock);
     blksz = max(blksz, DEFAULT_MEMORY_BLOCK_SIZE);
     if (blksz == DEFAULT_MEMORY_BLOCK_SIZE && !list_empty(&a->freelist)) {
         /* allocate from freelist */
@@ -444,6 +477,7 @@ block_alloc(struct block_allocator *a, int blksz)
     a->blkcnt++;
     list_init(&blk->hook);
     list_add_head(&a->blks, &blk->hook);
+    spinlock_end(&a->lock);
     return blk;
 }
 intern void
@@ -618,10 +652,10 @@ op_push(struct state *s, int n)
     assert(n > 0);
     assert(n < MAX_OPS-2);
 
-    {struct param_buffer *ob = s->opbuf;
+    {struct param_buf *ob = s->opbuf;
     if ((s->op_idx + n) >= (MAX_OPS-2)) {
         /* allocate new param buffer */
-        struct param_buffer *b = 0;
+        struct param_buf *b = 0;
         b = arena_push(&s->arena, 1, szof(*ob), 0);
         ob->ops[s->op_idx + 0].op = OP_NEXT_BUF;
         ob->ops[s->op_idx + 1].p = b;
@@ -634,16 +668,16 @@ op_push(struct state *s, int n)
     return op;
 }
 intern const char*
-store(struct state *s, const char *str, int n)
+str_store(struct state *s, const char *str, int n)
 {
     assert(s && str);
     assert(s->buf);
     assert(n < MAX_STR_BUF-1);
 
-    {struct buffer *ob = s->buf;
+    {struct str_buf *ob = s->buf;
     if ((s->buf_off + n) > MAX_STR_BUF-1) {
         /* allocate new data buffer */
-        struct buffer *b = arena_push(&s->arena, 1, szof(*ob), 0);
+        struct str_buf *b = arena_push(&s->arena, 1, szof(*ob), 0);
         s->buf_off = 0;
         ob->next = b;
         s->buf = ob = b;
@@ -657,6 +691,31 @@ store(struct state *s, const char *str, int n)
     s->buf_off += n + 1;
     return ob->buf + off;}}
 }
+intern void
+cmd_add(struct cmd_buf *s, struct memory_arena *a, const union cmd *cmd)
+{
+    assert(s);
+    assert(s->list);
+    assert(s->buf);
+
+    spinlock_begin(&s->lock);
+    {
+        struct cmd_block *blk = s->buf;
+        if (s->idx >= MAX_OPS) {
+            /* allocate new cmd buffer block */
+            struct cmd_block *b = 0;
+            b = arena_push(a, 1, szof(*blk), 0);
+            blk->next = b;
+            s->buf = blk = b;
+            s->idx = 0;
+        }
+        /* push cmd into buffer */
+        assert(s->idx < MAX_OPS);
+        blk->cmds[s->idx++] = *cmd;
+    }
+    spinlock_end(&s->lock);
+}
+
 /* ---------------------------------------------------------------------------
  *                                  IDs
  * --------------------------------------------------------------------------- */
@@ -774,10 +833,12 @@ module_begin(struct context *ctx, mid id,
     assert(ctx);
     if (!ctx) return 0;
 
-    /* pick up previous state if possible */
+    /* allocate or pick up previous state if possible */
     s = state_find(ctx, id);
     if (s) {s->op_idx -= 2; return s;}
+    spinlock_begin(&ctx->mem_lock);
     s = arena_push_type(&ctx->arena, struct state);
+    spinlock_end(&ctx->mem_lock);
     assert(s);
     if (!s) return 0;
 
@@ -786,24 +847,28 @@ module_begin(struct context *ctx, mid id,
     s->ctx = ctx;
     s->cfg = &ctx->cfg;
     s->arena.mem = &ctx->blkmem;
-    s->param_list = s->opbuf = arena_push(&s->arena, 1, szof(struct param_buffer), 0);
-    s->buf_list = s->buf = arena_push(&s->arena, 1, szof(struct buffer), 0);
+    s->param_list = s->opbuf = arena_push(&s->arena, 1, szof(struct param_buf), 0);
+    s->buf_list = s->buf = arena_push(&s->arena, 1, szof(struct str_buf), 0);
     s->mod = module_find(ctx, id);
     if (s->mod) s->repo = s->mod->repo[s->mod->repoid];
+
+    /* append state into list */
     list_init(&s->hook);
+    spinlock_begin(&ctx->module_lock);
     list_add_tail(&ctx->states, &s->hook);
+    spinlock_end(&ctx->module_lock);
     pushid(s, id);
 
     /* serialize api call */
     {union param *p = op_push(s, 8);
     p[0].op = OP_BUF_BEGIN;
     p[1].mid = id;
-    p[2].op = OP_BUF_ULINK;
+    p[2].op = OP_ULNK;
     p[3].mid = parent;
     p[4].id = bid;
-    p[5].op = OP_BUF_CONECT;
+    p[5].op = OP_CONCT;
     p[6].mid = owner;
-    p[7].i = rel;}
+    p[7].i = (int)rel;}
     return s;
 }
 api void
@@ -879,11 +944,11 @@ link(struct state *s, mid id, enum relationship rel)
     assert(s);
     if (!s) return;
     {union param *p = op_push(s, 5);
-    p[0].op = OP_BUF_DLINK;
+    p[0].op = OP_DLNK;
     p[1].mid = id;
-    p[2].op = OP_BUF_CONECT;
+    p[2].op = OP_CONCT;
     p[3].mid = id;
-    p[4].i = rel;}
+    p[4].i = (int)rel;}
 }
 api struct state*
 begin(struct context *ctx, mid id)
@@ -1141,7 +1206,7 @@ widget_param_str(struct state *s, const char *str, int len)
     {union param *p = widget_push_param(s);
     p[0].op = OP_PUSH_STR;
     p[1].i = len + 1;
-    return store(s, str, len);}
+    return str_store(s, str, len);}
 }
 api float*
 widget_modifier_float(struct state *s, float *f)
@@ -1374,7 +1439,6 @@ proc_begin(union process *p, enum process_type type,
     zero(p, szof(*p));
 
     p->type = type;
-    list_init(&p->input.evts);
     p->hdr.tmp = temp_memory_begin(arena);
     p->hdr.arena = arena;
     p->hdr.ctx = ctx;
@@ -1499,8 +1563,7 @@ process_begin(struct context *ctx, unsigned flags)
     #define jmpto(ctx,s) do{(ctx)->state = (s); goto r;}while(0)
     enum processing_states {
         STATE_DISPATCH,
-        STATE_COMMIT, STATE_LINK,
-        STATE_BLUEPRINT, STATE_LAYOUTING, STATE_TRANSFORM,
+        STATE_COMMIT, STATE_BLUEPRINT, STATE_LAYOUTING, STATE_TRANSFORM,
         STATE_INPUT, STATE_PAINT,
         STATE_CLEAR, STATE_GC, STATE_CLEANUP, STATE_DONE
     };
@@ -1521,61 +1584,33 @@ process_begin(struct context *ctx, unsigned flags)
         struct list_hook *si = 0;
         union process *p = &ctx->proc;
         proc_begin(p, PROC_COMMIT, ctx, &ctx->arena);
-        i = 0;
 
-        p->commit.cnt = 0;
         list_foreach(si, &ctx->states)
             p->commit.cnt++;
-        if (p->commit.cnt == 0)
-            jmpto(ctx, STATE_LINK);
-
-        /* allocate object for compiling each state into a repository */
+        if (p->commit.cnt == 0) {
+            /* state transition table */
+            if (flags & flag(PROC_BLUEPRINT))
+                jmpto(ctx, STATE_BLUEPRINT);
+            else if (flags & flag(PROC_CLEAR))
+                jmpto(ctx, STATE_GC);
+            else if (flags & flag(PROC_CLEANUP))
+                jmpto(ctx, STATE_CLEANUP);
+            else jmpto(ctx, STATE_DONE);
+        }
+        /* allocate memory for compilation objects and linking commands buffer */
         p->commit.objs = arena_push_array(p->hdr.arena, p->commit.cnt, struct object);
+        {struct cmd_block *cmds = arena_push(p->hdr.arena, 1, szof(struct cmd_block), 0);
+        p->commit.lnks.buf = p->commit.lnks.list = cmds;}
+
+        /* setup compilation objects */
         list_foreach(si, &ctx->states) {
             struct object *obj = p->commit.objs + i++;
             obj->in = list_entry(si, struct state, hook);
             obj->state = 0, obj->out = 0;
+            obj->cmds = &p->commit.lnks;
+            obj->mem = p->hdr.arena;
             obj->ctx = ctx;
-        } ctx->state = STATE_LINK;
-        return p;
-    }
-    case STATE_LINK: {
-        struct list_hook *it = 0;
-        if (list_empty(&ctx->states))
-            goto lnktbl;
-
-        /* reset input state and setup all tree nodes */
-        list_foreach(it, &ctx->mod) {
-            struct module *m = list_entry(it, struct module, hook);
-            struct repository *r = m->repo[m->repoid];
-            for (i = 0; i < r->boxcnt; ++i) {
-                /* reset box input state */
-                struct box *b = r->boxes + i;
-                b->drag_end = b->moved = 0;
-                b->pressed = b->released = 0;
-                b->clicked = b->scrolled = 0;
-                b->drag_begin = b->dragged = 0;
-                b->hovered = b->entered = b->exited = 0;
-                /* calculate box tree depth */
-                b->tree_depth = cast(unsigned short, b->depth + r->tree_depth);
-            }
-        }
-        /* free states */
-        {struct list_hook *si = 0;
-        list_foreach(si, &ctx->states) {
-            struct state *s = list_entry(si, struct state, hook);
-            arena_clear(&s->arena);
-        } list_init(&ctx->states);}
-
-        lnktbl:
-        /* state transition table */
-        if (flags & flag(PROC_BLUEPRINT))
-            jmpto(ctx, STATE_BLUEPRINT);
-        else if (flags & flag(PROC_CLEAR))
-            jmpto(ctx, STATE_GC);
-        else if (flags & flag(PROC_CLEANUP))
-            jmpto(ctx, STATE_CLEANUP);
-        else jmpto(ctx, STATE_DONE);
+        } return p;
     }
     case STATE_BLUEPRINT: {
         struct module *m = 0;
@@ -1631,6 +1666,7 @@ process_begin(struct context *ctx, unsigned flags)
     case STATE_INPUT: {
         union process *p = &ctx->proc;
         struct input *in = &ctx->input;
+
         if (in->resized) {
             /* window resize */
             struct box *root = ctx->tree;
@@ -1641,7 +1677,9 @@ process_begin(struct context *ctx, unsigned flags)
             in->resized = 0;
             if (w != in->width || h != in->height)
                 jmpto(ctx, STATE_BLUEPRINT);
-        } proc_begin(p, PROC_INPUT, ctx, &ctx->arena);
+        }
+        proc_begin(p, PROC_INPUT, ctx, &ctx->arena);
+        list_init(&p->input.evts);
         p->input.state = in;
 
         in->mouse.dx = in->mouse.x - in->mouse.lx;
@@ -2020,8 +2058,7 @@ commit_begin(struct context *ctx, struct process_commit *p, int idx)
     case STATE_DISPATCH: {
         struct state *s = obj->in;
         struct operation *op = &obj->op;
-        if (p->cnt == 0)
-            return 0;
+        if (p->cnt == 0) return 0;
 
         if (s->mod) {
             /* already have module so calculate required repo memory */
@@ -2090,10 +2127,7 @@ commit_begin(struct context *ctx, struct process_commit *p, int idx)
         op->obj = obj;
         obj->state = STATE_DONE;
         return op;
-    }
-    case STATE_DONE: {
-        return 0;
-    }}
+    } case STATE_DONE: return 0;}
     #undef jmpto
     return 0;
 }
@@ -2139,75 +2173,48 @@ compile(struct object *obj)
     int gtop = 0, depth = 1;
     int buf_off = 0, buf_size = 0;
 
-    struct buffer *buf = s->buf_list;
-    struct param_buffer *ob = s->param_list;
+    struct str_buf *buf = s->buf_list;
+    struct param_buf *ob = s->param_list;
     union param *op = &ob->ops[s->op_begin];
     boxstk[0] = repo->boxes;
     while (1) {
         switch (op[0].op) {
         /* ---------------------------- Buffer -------------------------- */
-        case OP_BUF_END:
-            goto eol0;
-        case OP_NEXT_BUF:
-            ob = (struct param_buffer*)op[1].p;
-            op = ob->ops;
-            continue;
         case OP_BUF_BEGIN: {
             assert(op[1].mid == s->id);
         } break;
-        case OP_BUF_ULINK: {
-            /* find parent module */
-            struct repository *prepo = 0;
-            struct module *pm = module_find(ctx, op[1].mid);
-            if (!pm) break;
-            prepo = pm->repo[pm->repoid];
-            if (!prepo) break;
-
-            /* link module root box into parent module box */
-            {int idx = lookup(&prepo->tbl, op[2].id);
-            struct box *pb = prepo->boxes + idx;
-            struct box *b = m->root;
-            list_del(&b->node);
-            list_add_tail(&pb->lnks, &b->node);
-            repo->tree_depth = prepo->tree_depth + pb->depth + 1;
-            b->parent = pb;}
-
-            /* relink child module directly after parent */
-            list_del(&m->hook);
-            list_add_tail(&ctx->mod, &m->hook);
-            m->parent = pm;
+        case OP_BUF_END:
+            goto eol0;
+        case OP_NEXT_BUF:
+            ob = (struct param_buf*)op[1].p;
+            op = ob->ops;
+            continue;
+        /* ---------------------------- Link -------------------------- */
+        case OP_ULNK: {
+            union cmd cmd;
+            cmd.type = CMD_LNK;
+            cmd.lnk.parent_mid = op[1].mid;
+            cmd.lnk.parent_id = op[2].id;
+            cmd.lnk.child_mid = m->id;
+            cmd.lnk.child_id = 0;
+            cmd_add(obj->cmds, obj->mem, &cmd);
         } break;
-        case OP_BUF_DLINK: {
-            /* find child module */
-            struct repository *crepo = 0;
-            struct module *cm = module_find(ctx, op[1].mid);
-            assert(cm);
-            if (!cm || !cm->root) break;
-            crepo = cm->repo[cm->repoid];
-            assert(crepo);
-            if (!crepo) break;
-
-            /* link referenced module root box into current box in module */
-            assert(depth > 0);
-            {struct box *pb = boxstk[depth-1];
-            struct box *b = cm->root;
-            list_del(&b->node);
-            list_add_tail(&pb->lnks, &b->node);
-            crepo->tree_depth = repo->tree_depth + depth + 1;
-            b->parent = pb;}
-
-            /* relink child module directly after parent */
-            list_del(&cm->hook);
-            list_add_tail(&ctx->mod, &cm->hook);
-            cm->parent = m;
+        case OP_DLNK: {
+            union cmd cmd;
+            cmd.type = CMD_LNK;
+            cmd.lnk.parent_mid = m->id;
+            cmd.lnk.parent_id = boxstk[depth-1]->id;
+            cmd.lnk.child_mid = op[1].mid;
+            cmd.lnk.child_id = op[2].id;
+            cmd_add(obj->cmds, obj->mem, &cmd);
         } break;
-        case OP_BUF_CONECT: {
-            /* setup lifetime connection */
-            struct module *pm = module_find(ctx, op[1].mid);
-            assert(pm);
-            if (!pm) break;
-            m->owner = pm;
-            m->rel = (enum relationship)op[2].i;
+        case OP_CONCT: {
+            union cmd cmd;
+            cmd.type = CMD_CONCT;
+            cmd.con.parent = op[1].mid;
+            cmd.con.child = m->id;
+            cmd.con.rel = op[2].i;
+            cmd_add(obj->cmds, obj->mem, &cmd);
         } break;
 
         /* --------------------------- Widgets -------------------------- */
@@ -2452,7 +2459,92 @@ process_end(union process *p)
     if (!p) return;
 
     switch (p->type) {
+    case PROC_COMMIT: {
+        int i = 0;
+        struct list_hook *it = 0;
+        struct context *ctx = p->hdr.ctx;
+
+        /* linking */
+        {const struct cmd_buf *buf = &p->commit.lnks;
+        const struct cmd_block *blk = buf->list;
+        do {int n = blk->next ? MAX_CMD_BUF: buf->idx;
+            for (i = 0; i < n; ++i) {
+                const union cmd *cmd = blk->cmds + i;
+                switch (cmd->type) {
+                default: assert(0); break;
+                case CMD_LNK: {
+                    /* link two modules together by specified boxes */
+                    const struct cmd_link *lnk = &cmd->lnk;
+                    struct module *pm = module_find(ctx, lnk->parent_mid);
+                    struct module *m = module_find(ctx, lnk->child_mid);
+
+                    assert(p && m);
+                    assert(pm != m);
+                    if (!p || !m || pm == m)
+                        continue;
+
+                    /* extract compiled repository of each module */
+                    {struct repository *prepo = 0;
+                    struct repository *repo = 0;
+                    prepo = pm->repo[pm->repoid];
+                    repo = m->repo[m->repoid];
+                    assert(prepo && repo);
+
+                    /* extract boxes to link as parent-child relationship */
+                    {int pidx = lookup(&prepo->tbl, lnk->parent_id);
+                    int idx = lookup(&repo->tbl, lnk->child_id);
+                    struct box *pb = prepo->boxes + pidx;
+                    struct box *b = repo->boxes + idx;
+                    repo->tree_depth = prepo->tree_depth + pb->depth + 1;
+
+                    /* link child into parent box link list */
+                    list_del(&b->node);
+                    list_add_tail(&pb->lnks, &b->node);
+                    b->parent = pb;
+
+                    /* relink modules so parent comes before child */
+                    list_del(&m->hook);
+                    list_add_tail(&ctx->mod, &m->hook);}}
+                } break;
+                case CMD_CONCT: {
+                    /* connect two modules life-time together */
+                    const struct cmd_connect *con = &cmd->con;
+                    struct module *pm = module_find(ctx, con->parent);
+                    struct module *m = module_find(ctx, con->child);
+
+                    assert(m && pm);
+                    if (!pm || !m) continue;
+                    m->owner = pm;
+                    m->rel = (enum relationship)con->rel;
+                } break;}
+            }
+        } while ((blk = blk->next) != 0);}
+
+        /* reset input state and setup all tree nodes */
+        list_foreach(it, &ctx->mod) {
+            struct module *m = list_entry(it, struct module, hook);
+            struct repository *r = m->repo[m->repoid];
+            for (i = 0; i < r->boxcnt; ++i) {
+                /* reset box input state */
+                struct box *b = r->boxes + i;
+                b->drag_end = b->moved = 0;
+                b->pressed = b->released = 0;
+                b->clicked = b->scrolled = 0;
+                b->drag_begin = b->dragged = 0;
+                b->hovered = b->entered = b->exited = 0;
+                /* calculate box tree depth */
+                b->tree_depth = cast(unsigned short, b->depth + r->tree_depth);
+            }
+        }
+        /* free states */
+        {struct list_hook *si = 0;
+        list_foreach(si, &ctx->states) {
+            struct state *s = list_entry(si, struct state, hook);
+            arena_clear(&s->arena);
+        } list_init(&ctx->states);}
+    } break;
     case PROC_INPUT: {
+        /* handle unblocking after popup have been closed  */
         struct context *ctx = p->hdr.ctx;
         struct input *in = &ctx->input;
         const int blk = popup_is_active(ctx, POPUP_BLOCKING);
