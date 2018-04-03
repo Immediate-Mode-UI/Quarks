@@ -4,7 +4,6 @@
 #include <assert.h> /* assert */
 #include <stdlib.h> /* calloc, free */
 #include <string.h> /* memcpy, memset */
-#include <inttypes.h> /* PRIu64 */
 #include <limits.h> /* INT_MAX */
 #include <stdio.h> /* fprintf, fputc */
 #include <emmintrin.h> /* _mm_pause */
@@ -67,6 +66,7 @@ static const struct component g_root = {
     g_root_data, 0, g_root_params, 0,
     0, 0, 0, 0
 };
+/* opcodes */
 #define OPCODES(OP)\
     OP(BUF_BEGIN,       1,  MIDFMT)\
     OP(BUF_END,         1,  MIDFMT)\
@@ -318,27 +318,27 @@ utf_encode_byte(unsigned long u, int i)
 api int
 utf_encode(char *s, int cap, unsigned long u)
 {
-    int len, i;
-    len = utf_validate(&u, 0);
-    if (cap < len || !len || len > UTF_SIZE)
+    int n, i;
+    n = utf_validate(&u, 0);
+    if (cap < n || !n || n > UTF_SIZE)
         return 0;
 
-    for (i = len - 1; i != 0; --i) {
+    for (i = n - 1; i != 0; --i) {
         s[i] = utf_encode_byte(u, 0);
         u >>= 6;
-    } s[0] = utf_encode_byte(u, len);
-    return len;
+    } s[0] = utf_encode_byte(u, n);
+    return n;
 }
 api int
-utf_len(const char *s, int len)
+utf_len(const char *s, int n)
 {
     int result = 0;
     int rune_len = 0;
     unsigned long rune = 0;
     if (!s) return 0;
 
-    while ((rune_len = utf_decode(&rune, s, len))) {
-        len = max(0,len-rune_len);
+    while ((rune_len = utf_decode(&rune, s, n))) {
+        n = max(0, n-rune_len);
         s += rune_len;
         result++;
     } return result;
@@ -833,9 +833,13 @@ module_begin(struct context *ctx, mid id,
     assert(ctx);
     if (!ctx) return 0;
 
-    /* allocate or pick up previous state if possible */
+    /* try to pick up previous state if possible */
+    spinlock_begin(&ctx->module_lock);
     s = state_find(ctx, id);
+    spinlock_end(&ctx->module_lock);
     if (s) {s->op_idx -= 2; return s;}
+
+    /* allocate temporary state */
     spinlock_begin(&ctx->mem_lock);
     s = arena_push_type(&ctx->arena, struct state);
     spinlock_end(&ctx->mem_lock);
@@ -2052,84 +2056,83 @@ commit_begin(struct context *ctx, struct process_commit *p, int idx)
         STATE_COMPILE,
         STATE_DONE
     };
-    #define jmpto(obj,s) do{(obj)->state = (s); goto r;}while(0)
     struct object *obj = &p->objs[idx];
-    r:switch (obj->state) {
-    case STATE_DISPATCH: {
-        struct state *s = obj->in;
-        struct operation *op = &obj->op;
-        if (p->cnt == 0) return 0;
-
-        if (s->mod) {
-            /* already have module so calculate required repo memory */
-            s->mod->seq = ctx->seq;
-            jmpto(obj, STATE_CALC_REQ_MEMORY);
+    while (1) {
+        switch (obj->state) {
+        case STATE_DISPATCH: {
+            struct state *s = obj->in;
+            struct operation *op = &obj->op;
+            if (p->cnt == 0) return 0;
+            if (s->mod) {
+                /* already have module so calculate required repo memory */
+                s->mod->seq = ctx->seq;
+                obj->state = STATE_CALC_REQ_MEMORY;
+                break;
+            }
+            /* allocate new module for state */
+            op_begin(op, OP_ALLOC_PERSISTENT);
+            op->alloc.size = szof(struct module);
+            obj->state = STATE_ALLOC_PERSISTENT;
+            return op;
         }
-        /* allocate new module for state */
-        op_begin(op, OP_ALLOC_PERSISTENT);
-        op->alloc.size = szof(struct module);
-        obj->state = STATE_ALLOC_PERSISTENT;
-        return op;
-    }
-    case STATE_ALLOC_PERSISTENT: {
-        struct state *s = obj->in;
-        struct operation *op = &obj->op;
-        if (!op->alloc.ptr) return op;
-        assert(op->alloc.ptr);
+        case STATE_ALLOC_PERSISTENT: {
+            struct state *s = obj->in;
+            struct operation *op = &obj->op;
+            if (!op->alloc.ptr) return op;
+            assert(op->alloc.ptr);
 
-        /* setup new module */
-        {struct module *m = cast(struct module*, op->alloc.ptr);
-        assert(type_aligned(m, struct module));
-        zero(m, szof(*m));
-        list_init(&m->hook);
-        m->id = s->id;
-        m->seq = ctx->seq;
-        m->size = szof(struct module);
-        s->mod = m;
+            /* setup new module */
+            {struct module *m = cast(struct module*, op->alloc.ptr);
+            assert(type_aligned(m, struct module));
+            zero(m, szof(*m));
+            list_init(&m->hook);
+            m->id = s->id;
+            m->seq = ctx->seq;
+            m->size = szof(struct module);
+            s->mod = m;
 
-        list_add_tail(&ctx->mod, &m->hook);}
-        jmpto(obj, STATE_CALC_REQ_MEMORY);
-        return op;
-    }
-    case STATE_CALC_REQ_MEMORY: {
-        struct state *s = obj->in;
-        struct operation *op = &obj->op;
-        op_begin(op, OP_ALLOC_FRAME);
+            list_add_tail(&ctx->mod, &m->hook);
+            obj->state = STATE_CALC_REQ_MEMORY;}
+        } break;
+        case STATE_CALC_REQ_MEMORY: {
+            struct state *s = obj->in;
+            struct operation *op = &obj->op;
+            op_begin(op, OP_ALLOC_FRAME);
 
-        s->boxcnt++;
-        s->tblcnt = cast(int, cast(float, s->boxcnt) * 1.35f);
-        s->tblcnt = npow2(s->tblcnt);
+            s->boxcnt++;
+            s->tblcnt = cast(int, cast(float, s->boxcnt) * 1.35f);
+            s->tblcnt = npow2(s->tblcnt);
 
-        /* calculate required repository memory */
-        op->alloc.size = s->total_buf_size;
-        op->alloc.size += box_align + param_align;
-        op->alloc.size += repo_size + repo_align;
-        op->alloc.size += int_align + uint_align + uiid_align;
-        op->alloc.size += ptr_size * (s->boxcnt + 1);
-        op->alloc.size += box_size * s->boxcnt;
-        op->alloc.size += uint_size * s->boxcnt;
-        op->alloc.size += uiid_size * s->tblcnt;
-        op->alloc.size += int_size * s->tblcnt;
-        op->alloc.size += param_size * s->argcnt;
-        jmpto(obj, STATE_ALLOC_TEMPORARY);
-    }
-    case STATE_ALLOC_TEMPORARY: {
-        struct operation *op = &obj->op;
-        if (op->alloc.ptr) {
-            obj->out = op->alloc.ptr;
-            obj->out->size = op->alloc.size;
-            jmpto(obj, STATE_COMPILE);
-        } return op;
-    }
-    case STATE_COMPILE: {
-        struct operation *op = &obj->op;
-        op_begin(op, OP_COMPILE);
-        op->obj = obj;
-        obj->state = STATE_DONE;
-        return op;
-    } case STATE_DONE: return 0;}
-    #undef jmpto
-    return 0;
+            /* calculate required repository memory */
+            op->alloc.size = s->total_buf_size;
+            op->alloc.size += box_align + param_align;
+            op->alloc.size += repo_size + repo_align;
+            op->alloc.size += int_align + uint_align + uiid_align;
+            op->alloc.size += ptr_size * (s->boxcnt + 1);
+            op->alloc.size += box_size * s->boxcnt;
+            op->alloc.size += uint_size * s->boxcnt;
+            op->alloc.size += uiid_size * s->tblcnt;
+            op->alloc.size += int_size * s->tblcnt;
+            op->alloc.size += param_size * s->argcnt;
+            obj->state = STATE_ALLOC_TEMPORARY;
+        } break;
+        case STATE_ALLOC_TEMPORARY: {
+            struct operation *op = &obj->op;
+            if (op->alloc.ptr) {
+                obj->out = op->alloc.ptr;
+                obj->out->size = op->alloc.size;
+                obj->state = STATE_COMPILE;
+                continue;
+            } return op;
+        }
+        case STATE_COMPILE: {
+            struct operation *op = &obj->op;
+            op_begin(op, OP_COMPILE);
+            op->obj = obj;
+            obj->state = STATE_DONE;
+            return op;
+        } case STATE_DONE: return 0;}
+    } return 0;
 }
 api int
 compile(struct object *obj)
@@ -2345,7 +2348,7 @@ commit(union process *p)
             switch (op->type) {
             case OP_ALLOC_PERSISTENT:
             case OP_ALLOC_FRAME:
-                op->alloc.ptr = calloc(1, op->alloc.size); break;
+                op->alloc.ptr = calloc(1, (size_t)op->alloc.size); break;
             case OP_COMPILE: compile(op->obj); break;}
             commit_end(op);
         }
@@ -2958,7 +2961,7 @@ input_key(struct context *ctx, int key, int down)
         return;
 
     in->keys[key].transitions++;
-    in->keys[key].down = !!down;
+    in->keys[key].down = (down == 0) ? 0: 1;
 }
 api void
 input_button(struct context *ctx, enum mouse_button idx, int down)
@@ -2973,7 +2976,7 @@ input_button(struct context *ctx, enum mouse_button idx, int down)
         return;
 
     btn = in->mouse.btn + idx;
-    btn->down = !!down;
+    btn->down = (down == 0) ? 0: 1;
     btn->transitions++;
 }
 api void
