@@ -2063,18 +2063,17 @@ commit_begin(struct context *ctx, struct process_commit *p, int idx)
             struct state *s = obj->in;
             struct operation *op = &obj->op;
             if (p->cnt == 0) return 0;
-            if (s->mod) {
-                /* already have module so calculate required repo memory */
-                s->mod->seq = ctx->seq;
-                obj->state = STATE_CALC_REQ_MEMORY;
-                break;
+            if (s->mod == 0) {
+                /* allocate new module for state */
+                op_begin(op, OP_ALLOC_PERSISTENT);
+                op->alloc.size = szof(struct module);
+                obj->state = STATE_ALLOC_PERSISTENT;
+                return op;
             }
-            /* allocate new module for state */
-            op_begin(op, OP_ALLOC_PERSISTENT);
-            op->alloc.size = szof(struct module);
-            obj->state = STATE_ALLOC_PERSISTENT;
-            return op;
-        }
+            /* already have module so calculate required repo memory */
+            s->mod->seq = ctx->seq;
+            obj->state = STATE_CALC_REQ_MEMORY;
+        } break;
         case STATE_ALLOC_PERSISTENT: {
             struct state *s = obj->in;
             struct operation *op = &obj->op;
