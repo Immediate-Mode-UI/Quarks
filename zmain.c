@@ -520,7 +520,7 @@ ui_input(union process *p, union event *evt)
         case WIDGET_COMBO: combo_input(ctx, b, evt); break;
         case WIDGET_COMBO_BOX_POPUP: combo_box_popup_input(ctx, b, evt); break;
         case WIDGET_SCROLL: scroll_input(b, evt); break;
-        case WIDGET_SCROLL_REGION: scroll_region_input(b, evt); break;
+        case WIDGET_SCROLL_REGION: scroll_region_input(ctx, b, evt); break;
         case WIDGET_SCROLL_BOX: scroll_box_input(ctx, b, evt); break;
         case WIDGET_OVERLAP_BOX: overlap_box_input(b, evt, p->hdr.arena); break;
         case WIDGET_ZOOM_BOX: zoom_box_input(b, evt); break;
@@ -872,12 +872,14 @@ ui_sidebar(struct state *s)
         "Desktop", "Images",
         "boot", "dev", "lib",
         "include", "tmp",
-        "usr", "root"
+        "usr", "root", "bin", "local",
+        "src", "shaders", "srv", "sys",
+        "var", "proc", "mnt"
     }; int i = 0;
 
     struct sidebar sb = sidebar_begin(s); {
         sborder_begin(s);
-        scroll_region_begin(s); {
+        scroll_box_begin(s); {
             struct flex_box fbx = flex_box_begin(s);
             *fbx.flow = FLEX_BOX_WRAP, *fbx.padding = 0;
             for (i = 0; i < cntof(folders); ++i) {
@@ -885,7 +887,7 @@ ui_sidebar(struct state *s)
                 if (icon_label(s, ICON_FOLDER, folders[i]))
                     printf("Button: %s clicked\n", folders[i]);
             } flex_box_end(s, &fbx);
-        } scroll_region_end(s);
+        } scroll_box_end(s);
         sborder_end(s);
     } sidebar_end(s, &sb);
 }

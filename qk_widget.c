@@ -496,7 +496,7 @@ scroll_region_layout(struct box *b)
     }
 }
 api void
-scroll_region_input(struct box *b, const union event *evt)
+scroll_region_input(struct context *ctx, struct box *b, const union event *evt)
 {
     struct input *in = evt->hdr.input;
     struct scroll_region sr = scroll_region_ref(b);
@@ -506,15 +506,20 @@ scroll_region_input(struct box *b, const union event *evt)
         case SCROLL_DEFAULT:
             *sr.off_x -= evt->moved.x;
             *sr.off_y -= evt->moved.y;
+            ctx->unbalanced = 1;
             break;
         case SCROLL_REVERSE:
             *sr.off_x += evt->moved.x;
             *sr.off_y += evt->moved.y;
+            ctx->unbalanced = 1;
             break;
         }
-    } else if (in->shortcuts[SHORTCUT_SCROLL_REGION_RESET].down)
+    } else if (in->shortcuts[SHORTCUT_SCROLL_REGION_RESET].down) {
         *sr.off_x = *sr.off_y = 0;
+        ctx->unbalanced = 1;
+    }
 }
+
 /* ---------------------------------------------------------------------------
  *                              SCROLL BOX
  * --------------------------------------------------------------------------- */
@@ -560,6 +565,7 @@ api void
 scroll_box_layout(struct box *b)
 {
     /* retrieve pointer for each widget */
+    struct list_hook *i = 0;
     static const int scroll_size = 10;
     struct list_hook *hx = b->lnks.next;
     struct list_hook *hy = hx->next;
@@ -590,17 +596,41 @@ scroll_box_layout(struct box *b)
     bsr->y = b->y;
     bsr->w = b->w - scroll_size;
     bsr->h = b->h - scroll_size;
+    scroll_region_layout(bsr);
 
     if (bx->moved)
         *sr.off_x = *x.off_x;
     else *x.off_x = *sr.off_x;
-    *x.size_x = bsr->w;
-    *x.total_x = bsr->dw;
 
     if (by->moved)
         *sr.off_y = *y.off_y;
     else *y.off_y = *sr.off_y;
+
+    /* HACK(micha): handle wrapping flex box */
+    list_foreach(i, &bsr->lnks) {
+        struct box *n = list_entry(i, struct box, node);
+
+        struct flex_box fbx;
+        if (n->type != WIDGET_FLEX_BOX) continue;
+        fbx = flex_box_ref(n);
+        if (*fbx.flow != FLEX_BOX_WRAP) continue;
+
+        {struct list_hook *j = 0;
+        int max_x = b->x, max_y = b->y;
+        flex_box_layout(n);
+        list_foreach(j, &n->lnks) {
+            const struct box *s = list_entry(j, struct box, node);
+            max_x = max(max_x, s->x + (int)*sr.off_x + s->w);
+            max_y = max(max_y, s->y + (int)*sr.off_y + s->h);
+        }
+        bsr->dw = max_x - b->x;
+        bsr->dh = max_y - b->y;}
+    }
+
+    *x.size_x = bsr->w;
     *y.size_y = bsr->h;
+
+    *x.total_x = bsr->dw;
     *y.total_y = bsr->dh;
 }
 api void
@@ -629,24 +659,31 @@ scroll_box_input(struct context *ctx, struct box *b, union event *evt)
         /* overscrolling */
         *sr.off_x = clamp(0, *sr.off_x, *x.total_x - *x.size_x);
         *sr.off_y = clamp(0, *sr.off_y, *y.total_y - *y.size_y);
+        ctx->unbalanced = 1;
     } break;
     case EVT_SCROLLED: {
         /* mouse scrolling */
         *sr.off_y += -evt->scroll.y * floori((cast(float, *y.size_y) * 0.1f));
         *sr.off_y = clamp(0, *sr.off_y, *y.total_y - *y.size_y);
+        ctx->unbalanced = 1;
     } break;
     case EVT_SHORTCUT: {
         /* shortcuts */
+        if (!evt->key.pressed) break;
         if (evt->key.code == SHORTCUT_SCROLL_BOX_BEGIN)
-            if (evt->key.pressed) *sr.off_y = 0;
-        if (evt->key.code == SHORTCUT_SCROLL_BOX_END)
-            if (evt->key.pressed) *sr.off_y = *y.total_y - *y.size_y;
-        if (evt->key.code == SHORTCUT_SCROLL_BOX_PGDN)
-            if (evt->key.pressed) *sr.off_y = min(*sr.off_y + *y.size_y, *y.total_y - *y.size_y);
-        if (evt->key.code == SHORTCUT_SCROLL_BOX_PGUP)
-            if (evt->key.pressed) *sr.off_y = max(*sr.off_y - *y.size_y, 0);
+            *sr.off_y = 0, ctx->unbalanced = 1;
+        else if (evt->key.code == SHORTCUT_SCROLL_BOX_END)
+            *sr.off_y = *y.total_y - *y.size_y, ctx->unbalanced = 1;
+        else if (evt->key.code == SHORTCUT_SCROLL_BOX_PGDN) {
+            *sr.off_y = min(*sr.off_y + *y.size_y, *y.total_y - *y.size_y);
+            ctx->unbalanced = 1;
+        } else if (evt->key.code == SHORTCUT_SCROLL_BOX_PGUP) {
+            *sr.off_y = max(*sr.off_y - *y.size_y, 0);
+            ctx->unbalanced = 1;
+        }
     } break;}
 }
+
 /* ---------------------------------------------------------------------------
  *                              ZOOM BOX
  * --------------------------------------------------------------------------- */
