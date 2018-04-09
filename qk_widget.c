@@ -598,6 +598,7 @@ scroll_box_layout(struct box *b)
     bsr->h = b->h - scroll_size;
     scroll_region_layout(bsr);
 
+    /* offset */
     if (bx->moved)
         *sr.off_x = *x.off_x;
     else *x.off_x = *sr.off_x;
@@ -626,12 +627,17 @@ scroll_box_layout(struct box *b)
         bsr->dw = max_x - b->x;
         bsr->dh = max_y - b->y;}
     }
-
+    /* scrollbars */
     *x.size_x = bsr->w;
     *y.size_y = bsr->h;
 
     *x.total_x = bsr->dw;
     *y.total_y = bsr->dh;
+
+    if (bsr->dw <= bsr->w)
+        *sr.off_x = *x.off_x = 0;
+    if (bsr->dh <= bsr->h)
+        *sr.off_y = *y.off_y = 0;
 }
 api void
 scroll_box_input(struct context *ctx, struct box *b, union event *evt)
