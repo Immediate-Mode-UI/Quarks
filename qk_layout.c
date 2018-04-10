@@ -212,7 +212,7 @@ flex_box_slot(struct state *s, struct flex_box *fbx,
     }
     widget_begin(s, WIDGET_FLEX_BOX_SLOT);
     id = widget_box_push(s);
-    widget_param_int(s, type);
+    widget_param_int(s, (int)type);
     widget_param_int(s, value);
     *fbx->cnt = *fbx->cnt + 1;
 }

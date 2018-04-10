@@ -528,6 +528,7 @@ ui_input(union process *p, union event *evt)
         case WIDGET_SIDEBAR_BAR: sidebar_bar_input(b, evt); break;
         case WIDGET_SIDEBAR_SCALER: sidebar_scaler_input(b, evt); break;
         case WIDGET_WINDOW: window_input(ctx, b, evt); break;
+        case WIDGET_WINDOW_CONTENT: window_content_input(ctx, b, evt); break;
         default: input(p, evt, b); break;}
     }
 }
@@ -892,7 +893,7 @@ ui_sidebar(struct state *s)
     } sidebar_end(s, &sb);
 }
 static void
-ui_immedate_mode(struct state *s)
+ui_immediate_mode(struct state *s)
 {
     /* Immediate mode panel */
     struct panel pan = panel_box_begin(s, "Immediate"); {
@@ -1024,12 +1025,11 @@ int main(int argc, char *argv[])
         {struct state *s = 0;
         if ((s = begin(ctx, id("Main")))) {
             ui_sidebar(s);
-
             /* Panels */
             {struct overlap_box obx = overlap_box_begin(s);
             overlap_box_slot(s, &obx, id("Immdiate Mode")); {
                 window_begin(s, 600, 50, 180, 250);
-                ui_immedate_mode(s);
+                ui_immediate_mode(s);
                 window_end(s);
             }
             overlap_box_slot(s, &obx, id("Retained Mode")); {

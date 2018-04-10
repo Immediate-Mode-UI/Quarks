@@ -258,6 +258,7 @@ window_ref(struct box *b)
     win.y = widget_get_int(b, 1);
     win.w = widget_get_int(b, 2);
     win.h = widget_get_int(b, 3);
+    win.border = widget_get_int(b, 4);
     return win;
 }
 api struct window
@@ -270,11 +271,16 @@ window_begin(struct state *s, int x, int y, int w, int h)
     win.y = widget_state_int(s, y);
     win.w = widget_state_int(s, w);
     win.h = widget_state_int(s, h);
+    win.border = widget_state_int(s, 3);
+    widget_begin(s, WIDGET_WINDOW_CONTENT);
+    widget_box_push(s);
     return win;
 }
 api void
 window_end(struct state *s)
 {
+    widget_box_pop(s);
+    widget_end(s);
     widget_box_pop(s);
     widget_end(s);
 }
@@ -293,13 +299,41 @@ window_layout(struct box *b)
     b->y = *win.y;
     b->w = *win.w;
     b->h = *win.h;
-    box_layout(b, 0);
+    box_layout(b, *win.border/2);
 }
 api void
 window_input(struct context *ctx, struct box *b, const union event *evt)
 {
+    int cx, cy, dx, dy;
+    struct window win;
+    struct input *in = evt->hdr.input;
+    if (evt->type != EVT_DRAGGED) return;
+    if (evt->hdr.origin != b) return;
+
+    win = window_ref(b);
+    cx = *win.x + (*win.w >> 1);
+    cy = *win.y + (*win.h >> 1);
+    dx = in->mouse.x - cx;
+    dy = in->mouse.y - cy;
+
+    if (abs(dx) > abs(dy)) {
+        if (dx < 0) {
+            *win.x += evt->dragged.x;
+            *win.w -= evt->dragged.x;
+        } else *win.w += evt->dragged.x;
+    } else {
+        if (dy < 0) {
+            *win.y += evt->dragged.y;
+            *win.h -= evt->dragged.y;
+        } else *win.h += evt->dragged.y;
+    } ctx->unbalanced = 1;
+}
+api void
+window_content_input(struct context *ctx, struct box *c, const union event *evt)
+{
     int i = 0;
     struct window win;
+    struct box *b = c->parent;
     if (evt->type != EVT_DRAGGED) return;
     if (evt->hdr.origin != b) {
         for (i = 0; i < evt->hdr.cnt; i++) {
@@ -311,10 +345,10 @@ window_input(struct context *ctx, struct box *b, const union event *evt)
     }
 move:
     win = window_ref(b);
-    b->moved = 1;
     *win.x += evt->dragged.x;
     *win.y += evt->dragged.y;
     ctx->unbalanced = 1;
+    b->moved = 1;
 }
 
 /* ---------------------------------------------------------------------------
@@ -478,12 +512,6 @@ sidebar_bar_input(struct box *b, union event *evt)
     /* state change */
     switch (evt->type) {
     default: return;
-    case EVT_ENTERED: {
-        if (evt->hdr.origin != b) return;
-        switch (*sb.state) {
-        default: return;
-        case SIDEBAR_CLOSED: *sb.state = SIDEBAR_OPEN; break;}
-    } break;
     case EVT_CLICKED: {
         switch (*sb.state) {
         default: return;

@@ -40,7 +40,8 @@ enum widget_type {
     WIDGET_SIDEBAR_SCALER,
     WIDGET_SIDEBAR_CONTENT,
     WIDGET_WINDOW,
-    WIDGET_CONTAINER_LAST = WIDGET_WINDOW,
+    WIDGET_WINDOW_CONTENT,
+    WIDGET_CONTAINER_LAST = WIDGET_WINDOW_CONTENT,
     /* Transformation */
     WIDGET_TRANSFORM_FIRST = 0x40000,
     WIDGET_CLIP_BOX,
@@ -332,7 +333,7 @@ struct scroll_region {
 api struct scroll_region scroll_region_begin(struct state *s);
 api void scroll_region_end(struct state *s);
 api void scroll_region_layout(struct box *b);
-api void scroll_region_input(struct box *b, const union event *evt);
+api void scroll_region_input(struct context *ctx, struct box *b, const union event *evt);
 api struct scroll_region scroll_region_ref(struct box *b);
 
 /* scroll box */
@@ -400,6 +401,7 @@ struct window {
     int *y;
     int *w;
     int *h;
+    int *border;
 };
 api struct window window_begin(struct state *s, int x, int y, int w, int h);
 api void window_end(struct state *s);
