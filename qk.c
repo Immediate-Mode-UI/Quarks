@@ -700,10 +700,10 @@ cmd_add(struct cmd_buf *s, struct memory_arena *a, const union cmd *cmd)
 
     spinlock_begin(&s->lock);
     {
-        struct cmd_block *blk = s->buf;
+        struct cmd_blk *blk = s->buf;
         if (s->idx >= MAX_OPS) {
             /* allocate new cmd buffer block */
-            struct cmd_block *b = 0;
+            struct cmd_blk *b = 0;
             b = arena_push(a, 1, szof(*blk), 0);
             blk->next = b;
             s->buf = blk = b;
@@ -1603,7 +1603,7 @@ process_begin(struct context *ctx, unsigned flags)
         }
         /* allocate memory for compilation objects and linking commands buffer */
         p->commit.objs = arena_push_array(p->hdr.arena, p->commit.cnt, struct object);
-        {struct cmd_block *cmds = arena_push(p->hdr.arena, 1, szof(struct cmd_block), 0);
+        {struct cmd_blk *cmds = arena_push(p->hdr.arena, 1, szof(struct cmd_blk), 0);
         p->commit.lnks.buf = p->commit.lnks.list = cmds;}
 
         /* setup compilation objects */
@@ -2468,7 +2468,7 @@ process_end(union process *p)
 
         /* linking */
         {const struct cmd_buf *buf = &p->commit.lnks;
-        const struct cmd_block *blk = buf->list;
+        const struct cmd_blk *blk = buf->list;
         do {int n = blk->next ? MAX_CMD_BUF: buf->idx;
             for (i = 0; i < n; ++i) {
                 const union cmd *cmd = blk->cmds + i;

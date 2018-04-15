@@ -1,8 +1,12 @@
 #ifndef QK_H
 #define QK_H
 
-#include <stdint.h>
-#include <stdio.h>
+#include <assert.h> /* assert */
+#include <stdlib.h> /* calloc, free */
+#include <string.h> /* memcpy, memset */
+#include <inttypes.h> /* PRIu64 */
+#include <limits.h> /* INT_MAX */
+#include <stdio.h> /* fprintf, fputc */
 
 /* macros */
 #define api extern
@@ -424,14 +428,14 @@ union cmd {
     struct cmd_link lnk;
     struct cmd_connect con;
 };
-struct cmd_block {
-    struct cmd_block *next;
+struct cmd_blk {
+    struct cmd_blk *next;
     union cmd cmds[MAX_CMD_BUF];
 };
 struct cmd_buf {
     int idx;
-    struct cmd_block *list;
-    struct cmd_block *buf;
+    struct cmd_blk *list;
+    struct cmd_blk *buf;
     volatile unsigned lock;
 };
 
