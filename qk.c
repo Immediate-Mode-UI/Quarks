@@ -2476,7 +2476,7 @@ process_end(union process *p)
                 default: assert(0); break;
                 case CMD_LNK: {
                     /* link two modules together by specified boxes */
-                    const struct cmd_link *lnk = &cmd->lnk;
+                    const struct cmd_lnk *lnk = &cmd->lnk;
                     struct module *pm = module_find(ctx, lnk->parent_mid);
                     struct module *m = module_find(ctx, lnk->child_mid);
 
@@ -2510,7 +2510,7 @@ process_end(union process *p)
                 } break;
                 case CMD_CONCT: {
                     /* connect two modules life-time together */
-                    const struct cmd_connect *con = &cmd->con;
+                    const struct cmd_con *con = &cmd->con;
                     struct module *pm = module_find(ctx, con->parent);
                     struct module *m = module_find(ctx, con->child);
 

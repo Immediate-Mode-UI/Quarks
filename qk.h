@@ -411,22 +411,22 @@ enum cmd_type {
     CMD_CONCT,
     CMD_CNT
 };
-struct cmd_link {
+struct cmd_lnk {
     enum cmd_type type;
     mid parent_mid;
     uiid parent_id;
     mid child_mid;
     uiid child_id;
 };
-struct cmd_connect {
+struct cmd_con {
     enum cmd_type type;
     mid parent, child;
     int rel;
 };
 union cmd {
     enum cmd_type type;
-    struct cmd_link lnk;
-    struct cmd_connect con;
+    struct cmd_lnk lnk;
+    struct cmd_con con;
 };
 struct cmd_blk {
     struct cmd_blk *next;
