@@ -1513,24 +1513,24 @@ event_add_box(union event *evt, struct box *box)
 intern union event*
 event_begin(union process *p, enum event_type type, struct box *orig)
 {
-    union event *res = 0;
+    union event *evt = 0;
     assert(p);
     assert(orig);
 
     /* allocate event and link into list */
-    res = arena_push_type(p->hdr.arena, union event);
-    assert(res);
-    list_init(&res->hdr.hook);
-    list_add_tail(&p->input.evts, &res->hdr.hook);
+    evt = arena_push_type(p->hdr.arena, union event);
+    assert(evt);
+    list_init(&evt->hdr.hook);
+    list_add_tail(&p->input.evts, &evt->hdr.hook);
 
     /* setup event */
-    res->type = type;
-    res->hdr.input = p->input.state;
-    res->hdr.origin = orig;
-    res->hdr.cap = orig->tree_depth + 1;
-    res->hdr.boxes = arena_push_array(p->hdr.arena, res->hdr.cap, struct box*);
-    event_add_box(res, orig);
-    return res;
+    evt->type = type;
+    evt->hdr.input = p->input.state;
+    evt->hdr.origin = orig;
+    evt->hdr.cap = orig->tree_depth + 1;
+    evt->hdr.boxes = arena_push_array(p->hdr.arena, evt->hdr.cap, struct box*);
+    event_add_box(evt, orig);
+    return evt;
 }
 intern void
 event_end(union event *evt)
