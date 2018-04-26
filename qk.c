@@ -1567,7 +1567,7 @@ process_begin(struct context *ctx, unsigned flags)
     #define jmpto(ctx,s) do{(ctx)->state = (s); goto r;}while(0)
     enum processing_states {
         STATE_DISPATCH,
-        STATE_COMMIT, STATE_BLUEPRINT, STATE_LAYOUTING, STATE_TRANSFORM,
+        STATE_COMMIT, STATE_BLUEPRINT, STATE_LAYOUTING,
         STATE_INPUT, STATE_PAINT,
         STATE_CLEAR, STATE_GC, STATE_CLEANUP, STATE_DONE
     };
