@@ -2400,16 +2400,14 @@ layout(union process *op, struct box *b)
     switch (b->type) {
     case WIDGET_TREE_ROOT:
     case WIDGET_SLOT:
+    case WIDGET_OVERLAY:
+    case WIDGET_UNBLOCKING:
+    case WIDGET_BLOCKING:
+    case WIDGET_UI:
         layout_default(b); break;
     case WIDGET_ROOT:
         b->w = ctx->input.width;
         b->h = ctx->input.height;
-        layout_default(b); break;
-    case WIDGET_OVERLAY:
-    case WIDGET_UNBLOCKING:
-    case WIDGET_BLOCKING:
-        layout_default(b); break;
-    case WIDGET_UI:
         layout_default(b); break;
     case WIDGET_POPUP:
     case WIDGET_CONTEXTUAL: {
