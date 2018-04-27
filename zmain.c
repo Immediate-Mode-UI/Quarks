@@ -1,9 +1,5 @@
-#include <assert.h> /* assert */
-#include <stdlib.h> /* calloc, free */
-#include <string.h> /* memcpy, memset */
-#include <inttypes.h> /* PRIu64 */
-#include <limits.h> /* INT_MAX */
-#include <stdio.h> /* fprintf, fputc */
+#include <stdlib.h>
+#include <stdio.h>
 
 #include "qk.h"
 #include "qk.c"
@@ -70,8 +66,8 @@
 #include "nanovg/src/nanovg.h"
 #include "nanovg/src/nanovg.c"
 #include "nanovg/src/nanovg_gl.h"
-
 #include "IconsFontAwesome.h"
+
 #ifdef __clang__
 #pragma clang diagnostic pop
 #elif defined(__GNUC__) || defined(__GNUG__)
@@ -91,11 +87,6 @@ enum icons {
     ICON_FOLDER,
     ICON_CNT
 };
-intern int
-is_black(NVGcolor col)
-{
-    return col.r == 0.0f && col.g == 0.0f && col.b == 0.0f && col.a == 0.0f;
-}
 static int
 nvgTextMeasure(void *usr, int font,
     int fh, const char *txt, int len)
@@ -114,7 +105,7 @@ nvgLabel(struct NVGcontext *vg, struct box *b)
     nvgFontFaceId(vg, *lbl.font);
     nvgFontSize(vg, *lbl.height);
     nvgTextAlign(vg, NVG_ALIGN_LEFT|NVG_ALIGN_TOP);
-    nvgFillColor(vg, nvgRGBA(220,220,220,255));
+    nvgFillColor(vg, nvgRGBA(200,200,200,255));
     nvgText(vg, b->x, b->y, lbl.txt, NULL);
 }
 static void
@@ -148,7 +139,6 @@ nvgIcon(struct NVGcontext *vg, struct box *b)
 }
 enum nvgButtonStyle {
     NVG_BUTTON_DEFAULT,
-    NVG_BUTTON_BLACK,
     NVG_BUTTON_TRANSPARENT
 };
 static void
@@ -159,81 +149,67 @@ nvgButton(struct NVGcontext *vg, struct box *b)
 
     switch (style) {
     default:
-    case NVG_BUTTON_DEFAULT: col = nvgRGBA(128,16,8,255); break;
-    case NVG_BUTTON_TRANSPARENT: if (!b->hovered) return;
-    case NVG_BUTTON_BLACK: col = nvgRGBA(0,0,0,1); break;}
-
-    {static const float corner_radius = 4.0f;
-    NVGcolor src = nvgRGBA(255,255,255, is_black(col) ? 16: 32);
-    NVGcolor dst = nvgRGBA(0,0,0, is_black(col) ? 16: 32);
-    NVGpaint bg = nvgLinearGradient(vg, b->x, b->y, b->x, b->y + b->h, src, dst);
-
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, b->x+1,b->y+1, b->w-2,b->h-2, corner_radius-1);
-    if (!is_black(col)) {
+    case NVG_BUTTON_DEFAULT: {
         if (b->hovered)
-            col.a = 0.9f;
+            col = nvgRGBA(40,40,40,255);
+        else if (b->pressed)
+            col = nvgRGBA(35,35,35,255);
+        else col = nvgRGBA(55,55,55,255);
+
+        nvgBeginPath(vg);
+        nvgRect(vg, b->x,b->y, b->w,b->h);
         nvgFillColor(vg, col);
         nvgFill(vg);
-    }
-    nvgFillPaint(vg, bg);
-    nvgFill(vg);
 
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, b->x+0.5f,b->y+0.5f, b->w-1,b->h-1, corner_radius-0.5f);
-    nvgStrokeColor(vg, nvgRGBA(0,0,0,48));
-    nvgStroke(vg);}
+        nvgBeginPath(vg);
+        nvgRect(vg, b->x,b->y, b->w, b->h);
+        nvgStrokeColor(vg, nvgRGBA(60,60,60,255));
+        nvgStroke(vg);
+    } break;
+    case NVG_BUTTON_TRANSPARENT:
+        col = nvgRGBA(0,0,0,0);
+        if (b->hovered || b->pressed) {
+            nvgBeginPath(vg);
+            nvgRect(vg, b->x,b->y, b->w, b->h);
+            nvgStrokeColor(vg, nvgRGBA(60,60,60,255));
+            nvgStroke(vg);
+        } break;
+    }
 }
 static void
 nvgSlider(struct NVGcontext *vg, struct box *b)
 {
-    NVGpaint bg, knob;
+    NVGpaint bg;
     struct slider sld = slider_ref(b);
+    struct box *p = b->parent;
+    float cy = p->y+(int)(p->h*0.5f);
     if (sld.cid != b->id) return;
 
-    {struct box *p = b->parent;
-    float cy = p->y+(int)(p->h*0.5f);
-    nvgSave(vg);
-
     /* Slot */
-    bg = nvgBoxGradient(vg, p->x,cy-2+1, p->w,4, 2,2, nvgRGBA(0,0,0,32), nvgRGBA(0,0,0,128));
+    bg = nvgBoxGradient(vg, p->x,cy-2+1, p->w,4, 2,2, nvgRGBA(10,10,10,32), nvgRGBA(10,10,10,128));
     nvgBeginPath(vg);
     nvgRoundedRect(vg, p->x, cy-2, p->w, 4, 2);
     nvgFillPaint(vg, bg);
     nvgFill(vg);
 
-    /* Knob Shadow */
-    bg = nvgBoxGradient(vg, b->x, b->y, b->w, b->h, 3,4, nvgRGBA(0,0,0,64), nvgRGBA(0,0,0,0));
-    nvgBeginPath(vg);
-    nvgRect(vg, b->x-5, b->y-5, b->w+5, b->h+5);
-    nvgPathWinding(vg, NVG_HOLE);
-    nvgFillPaint(vg, bg);
-    nvgFill(vg);
-
-    /* Knob */
-    {NVGcolor src = nvgRGBA(255,255,255, 32);
-    NVGcolor dst = nvgRGBA(0,0,0, 32);
-    knob = nvgLinearGradient(vg, b->x, b->y, b->x, b->y + b->h, src, dst);}
-
+    /* knob */
     nvgBeginPath(vg);
     nvgRect(vg, b->x, b->y, b->w, b->h);
     if (b->hovered)
-        nvgFillColor(vg, nvgRGBA(128,16,8,230));
-    else nvgFillColor(vg, nvgRGBA(128,16,8,255));
-    nvgFill(vg);
-    nvgFillPaint(vg, knob);
+        nvgFillColor(vg, nvgRGBA(50,50,50,255));
+    else nvgFillColor(vg, nvgRGBA(60,60,60,255));
     nvgFill(vg);
 
+    /* knob border */
     nvgBeginPath(vg);
-    nvgRect(vg, b->x, b->y, b->w, b->h);
-    nvgStrokeColor(vg, nvgRGBA(0,0,0,92));
+    nvgRect(vg, b->x,b->y, b->w, b->h);
+    nvgStrokeColor(vg, nvgRGBA(70,70,70,255));
     nvgStroke(vg);
-    nvgRestore(vg);}
 }
 static void
 nvgScroll(struct NVGcontext *vg, struct box *b)
 {
-    NVGpaint pt;
+    NVGcolor col;
     struct box *p = b->parent;
     struct scroll scrl = scroll_ref(b);
     if (scrl.cid != b->id) return;
@@ -241,46 +217,35 @@ nvgScroll(struct NVGcontext *vg, struct box *b)
         return; /* skip if fully visible */
 
     /* draw scroll background  */
-    pt = nvgBoxGradient(vg, p->x, p->y, p->w, p->h, 3,4, nvgRGBA(0,0,0,32), nvgRGBA(0,0,0,92));
     nvgBeginPath(vg);
-    nvgRoundedRect(vg, p->x, p->y, p->w, p->h, 3);
-    nvgFillPaint(vg, pt);
+    nvgRect(vg, p->x,p->y, p->w,p->h);
+    nvgFillColor(vg, nvgRGBA(40,40,40,255));
     nvgFill(vg);
 
     /* draw scroll cursor  */
-    {NVGcolor src = nvgRGBA(255,255,255, 32);
-    NVGcolor dst = nvgRGBA(0,0,0, 32);
-    pt = nvgLinearGradient(vg, b->x, b->y, b->x, b->y + b->h, src, dst);}
-    nvgBeginPath(vg);
-    nvgRoundedRect(vg, b->x, b->y, b->w, b->h, 3);
     if (b->hovered)
-        nvgFillColor(vg, nvgRGBA(128,16,8,230));
-    else nvgFillColor(vg, nvgRGBA(128,16,8,255));
-    nvgFill(vg);
-    nvgFillPaint(vg, pt);
+        col = nvgRGBA(55,55,55,255);
+    else if (b->pressed)
+        col = nvgRGBA(50,50,50,255);
+    else col = nvgRGBA(60,60,60,255);
+
+    nvgBeginPath(vg);
+    nvgRect(vg, b->x,b->y, b->w,b->h);
+    nvgFillColor(vg, col);
     nvgFill(vg);
 }
 static void
 nvgComboPopup(struct NVGcontext *vg, struct box *b)
 {
-    NVGpaint shadowPaint;
-    int x = b->x, y = b->y;
-    int w = b->w, h = b->h;
-
-    /* Window */
     nvgBeginPath(vg);
-    nvgRect(vg, x,y, w,h);
-    nvgFillColor(vg, nvgRGBA(28,30,34,192));
+    nvgRect(vg, b->x,b->y, b->w,b->h);
+    nvgFillColor(vg, nvgRGBA(45,45,45,255));
     nvgFill(vg);
 
-    /* Drop shadow */
-    shadowPaint = nvgBoxGradient(vg, x,y+2, w,h, 2, 10, nvgRGBA(0,0,0,128), nvgRGBA(0,0,0,0));
     nvgBeginPath(vg);
-    nvgRect(vg, x-10,y-10, w+20,h+30);
-    nvgRect(vg, x,y, w,h);
-    nvgPathWinding(vg, NVG_HOLE);
-    nvgFillPaint(vg, shadowPaint);
-    nvgFill(vg);
+    nvgRect(vg, b->x,b->y, b->w, b->h);
+    nvgStrokeColor(vg, nvgRGBA(60,60,60,255));
+    nvgStroke(vg);
 }
 static void
 nvgClipRegion(struct NVGcontext *vg, struct box *b, int pidx, struct rect *sis)
@@ -334,88 +299,51 @@ nvgScaleRegion(struct NVGcontext *vg, struct box *b, float *x, float *y)
 static void
 nvgPanel(struct NVGcontext *vg, struct box *b)
 {
-    float cornerRadius = 3.0f;
-    int x = b->x, y = b->y;
-    int w = b->w, h = b->h;
-    NVGpaint shadow;
-
-    /* panel */
     nvgBeginPath(vg);
-    nvgRoundedRect(vg, x,y, w,h, cornerRadius);
-    nvgFillColor(vg, nvgRGBA(28,30,34,192));
+    nvgRect(vg, b->x,b->y, b->w, b->h);
+    nvgFillColor(vg, nvgRGBA(45,45,45,255));
     nvgFill(vg);
 
-    /* shadow */
-    shadow = nvgBoxGradient(vg, x,y+2, w,h, cornerRadius*2, 10,
-        nvgRGBA(0,0,0,128), nvgRGBA(0,0,0,0));
     nvgBeginPath(vg);
-    nvgRect(vg, x-10,y-10, w+20,h+30);
-    nvgRoundedRect(vg, x,y, w,h, cornerRadius);
-    nvgPathWinding(vg, NVG_HOLE);
-    nvgFillPaint(vg, shadow);
-    nvgFill(vg);
+    nvgRect(vg, b->x,b->y, b->w, b->h);
+    nvgStrokeColor(vg, nvgRGBA(60,60,60,255));
+    nvgStroke(vg);
 }
 static void
 nvgPanelHeader(struct NVGcontext *vg, struct box *b)
 {
-    float cornerRadius = 3.0f;
-    int x = b->x, y = b->y;
-    int w = b->w, h = b->h;
-    NVGpaint headerPaint;
-
-    headerPaint = nvgLinearGradient(vg, x,y,x,y+15, nvgRGBA(255,255,255,8), nvgRGBA(0,0,0,16));
     nvgBeginPath(vg);
-    nvgRoundedRect(vg, x+1,y+1, w-2,h, cornerRadius-1);
-    nvgFillPaint(vg, headerPaint);
+    nvgRect(vg, b->x,b->y, b->w,b->h);
+    nvgFillColor(vg, nvgRGBA(50,50,50,255));
     nvgFill(vg);
-
-    nvgBeginPath(vg);
-    nvgMoveTo(vg, x+0.5f, y+0.5f+h);
-    nvgLineTo(vg, x+0.5f+w-1, y+0.5f+h);
-    nvgStrokeColor(vg, nvgRGBA(25,25,25,255));
-    nvgStroke(vg);
 }
 static void
 nvgSidebarScaler(struct NVGcontext *vg, struct box *b)
 {
-    NVGcolor src = nvgRGBA(255,255,255, 32);
-    NVGcolor dst = nvgRGBA(0,0,0, 32);
-    NVGpaint bg = nvgLinearGradient(vg, b->x, b->y, b->x, b->y + b->h, src, dst);
-    NVGcolor col = nvgRGBA(128,16,8,255);
-
     nvgBeginPath(vg);
     nvgMoveTo(vg, b->x, b->y);
     nvgLineTo(vg, b->x + b->w, b->y + 5);
     nvgLineTo(vg, b->x + b->w, b->y + b->h - 5);
     nvgLineTo(vg, b->x, b->y + b->h);
     nvgClosePath(vg);
-    if (b->hovered)
-        col.a = 0.9f;
-    nvgFillColor(vg, col);
+    nvgFillColor(vg, nvgRGBA(35,35,35,255));
     nvgFill(vg);
-    nvgFillPaint(vg, bg);
-    nvgFill(vg);
+    nvgStrokeColor(vg, nvgRGBA(60,60,60,255));
+    nvgStroke(vg);
 }
 static void
 nvgSidebarBar(struct NVGcontext *vg, struct box *b)
 {
-    NVGcolor src = nvgRGBA(255,255,255, 32);
-    NVGcolor dst = nvgRGBA(0,0,0, 32);
-    NVGpaint bg = nvgLinearGradient(vg, b->x, b->y, b->x, b->y + b->h, src, dst);
-    NVGcolor col = nvgRGBA(128,16,8,255);
-
     nvgBeginPath(vg);
     nvgMoveTo(vg, b->x, b->y);
     nvgLineTo(vg, b->x + b->w, b->y + 10);
     nvgLineTo(vg, b->x + b->w, b->y + b->h - 10);
     nvgLineTo(vg, b->x, b->y + b->h);
     nvgClosePath(vg);
-    if (b->hovered)
-        col.a = 0.9f;
-    nvgFillColor(vg, col);
+    nvgFillColor(vg, nvgRGBA(35,35,35,255));
     nvgFill(vg);
-    nvgFillPaint(vg, bg);
-    nvgFill(vg);
+    nvgStrokeColor(vg, nvgRGBA(60,60,60,255));
+    nvgStroke(vg);
 }
 /* ---------------------------------------------------------------------------
  *                                  PLATFORM
