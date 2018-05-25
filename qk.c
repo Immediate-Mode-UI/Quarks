@@ -597,8 +597,7 @@ insert(struct table *t, uiid key, int val)
 {
     uiid n = cast(uiid, t->cnt);
     uiid i = key & (n-1), b = i;
-    do {uiid k = t->keys[i];
-        if (k) continue;
+    do {if (t->keys[i]) continue;
         t->keys[i] = key;
         t->vals[i] = val; return;
     } while ((i = ((i+1) & (n-1))) != b);
